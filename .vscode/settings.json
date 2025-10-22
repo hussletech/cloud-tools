@@ -1,0 +1,15 @@
+{
+  "debug.javascript.autoAttachFilter": "onlyWithFlag",
+  "debug.internalConsoleOptions": "neverOpen",
+  "javascript.preferences.quoteStyle": "single",
+  "editor.formatOnSave": false,
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/.env": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/s3": true
+  }
+}
+

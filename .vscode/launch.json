@@ -1,0 +1,43 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug Brightcove Migration",
+      "skipFiles": ["<node_internals>/**"],
+      "program": "${workspaceFolder}/bc-migration/app.js",
+      "cwd": "${workspaceFolder}/bc-migration",
+      "envFile": "${workspaceFolder}/bc-migration/.env",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen"
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug with Breakpoints",
+      "skipFiles": ["<node_internals>/**"],
+      "program": "${workspaceFolder}/bc-migration/app.js",
+      "cwd": "${workspaceFolder}/bc-migration",
+      "envFile": "${workspaceFolder}/bc-migration/.env",
+      "console": "integratedTerminal",
+      "stopOnEntry": false,
+      "sourceMaps": false
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug Single Video (First Row)",
+      "skipFiles": ["<node_internals>/**"],
+      "program": "${workspaceFolder}/bc-migration/app.js",
+      "cwd": "${workspaceFolder}/bc-migration",
+      "envFile": "${workspaceFolder}/bc-migration/.env",
+      "console": "integratedTerminal",
+      "env": {
+        "DEBUG_MODE": "true",
+        "MAX_VIDEOS": "1"
+      }
+    }
+  ]
+}
+
