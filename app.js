@@ -5,7 +5,7 @@ const path = require('path');
 const { parse } = require('csv-parse/sync');
 const { pipeline } = require('stream/promises');
 
-const CSV_FILE_PATH = './bc-video-multi-client.csv';
+const CSV_FILE_PATH = './bc-video-all.csv';
 
 const BRIGHTCOVE_OAUTH_URL = 'https://oauth.brightcove.com/v4/access_token';
 const BRIGHTCOVE_CMS_URL = 'https://cms.api.brightcove.com/v1';
@@ -170,7 +170,7 @@ const getLastVideoSource = (sources) => {
 
 const processVideo = async (videoInfo, accessToken) => {
   const { bc_id, web_root } = videoInfo;
-  
+
   console.log(`Processing video: ${bc_id} for ${web_root}`);
   
   const outputDir = path.join(OUTPUT_BASE_PATH, web_root, OUTPUT_SUFFIX_PATH);
