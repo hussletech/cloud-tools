@@ -5,10 +5,11 @@ const path = require('path');
 const { parse } = require('csv-parse/sync');
 const { pipeline } = require('stream/promises');
 
+const CSV_FILE_PATH = './bc-video-multi-client.csv';
+
 const BRIGHTCOVE_OAUTH_URL = 'https://oauth.brightcove.com/v4/access_token';
 const BRIGHTCOVE_CMS_URL = 'https://cms.api.brightcove.com/v1';
 const BRIGHTCOVE_ACCOUNT_ID = '659677170001';
-const CSV_FILE_PATH = './bc-migration-amare.csv';
 const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com';
 const OUTPUT_SUFFIX_PATH = 'assets/video';
 const MAX_CONCURRENT_VIDEOS = 5;
