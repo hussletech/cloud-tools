@@ -1,3 +1,15 @@
+```
+  ssh -i default_secure.pem ec2-user@54.90.49.115
+```
+
+```
+# Script location
+/home/ec2-user/bc-migration/cloud-tools/app.js
+
+# Output location (will work correctly)
+/home/ec2-user/assets.soundconcepts.com/webroot_amare/assets/video/
+```
+
 # Brightcove Video Migration Tool
 
 Node.js application to migrate videos from Brightcove CMS to S3-mounted filesystem on EC2.

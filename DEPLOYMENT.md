@@ -2,8 +2,29 @@
 
 ## 1. Prerequisites on EC2
 
+### Amazon Linux 2 (GLIBC 2.26 - Recommended for AL2)
+
 ```bash
-# Install Node.js (if not already installed)
+# Install NVM first (Node Version Manager)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+source ~/.bashrc
+
+# Install Node.js 16.x (compatible with Amazon Linux 2)
+nvm install 16
+nvm use 16
+nvm alias default 16
+
+# Verify installation
+node --version
+npm --version
+```
+
+**Important:** Amazon Linux 2 has GLIBC 2.26, which is incompatible with Node.js 18+. Use Node.js 16.x for Amazon Linux 2.
+
+### Amazon Linux 2023 or newer systems
+
+```bash
+# Install Node.js 18 or higher (if using Amazon Linux 2023+)
 curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
 sudo yum install -y nodejs
 
@@ -179,6 +200,21 @@ crontab -e
 ```
 
 ## 8. Troubleshooting
+
+### GLIBC Version Error (Amazon Linux 2)
+```bash
+# Error: node: /lib64/libc.so.6: version `GLIBC_2.27' not found
+# Error: node: /lib64/libc.so.6: version `GLIBC_2.28' not found
+
+# Solution: Use Node.js 16 instead of 18+
+nvm uninstall 20  # or 22, 18, etc.
+nvm install 16
+nvm use 16
+nvm alias default 16
+node -v  # Should now work without GLIBC errors
+```
+
+**Root cause:** Amazon Linux 2 uses GLIBC 2.26. Node.js 18+ requires GLIBC 2.27+. Node.js 16 is the last LTS version compatible with Amazon Linux 2.
 
 ### Check S3 mount
 ```bash
