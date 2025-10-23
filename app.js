@@ -171,6 +171,11 @@ const getLastVideoSource = (sources) => {
 const processVideo = async (videoInfo, accessToken) => {
   const { bc_id, web_root } = videoInfo;
 
+  if (!bc_id || bc_id === "" || !web_root || web_root === "") {
+    console.log(`Skipping video with empty bc_id or web_root: bc_id=${bc_id}, web_root=${web_root}`);
+    return;
+  }
+
   console.log(`Processing video: ${bc_id} for ${web_root}`);
   
   const outputDir = path.join(OUTPUT_BASE_PATH, web_root, OUTPUT_SUFFIX_PATH);
