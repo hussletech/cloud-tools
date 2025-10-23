@@ -12,7 +12,7 @@ const BRIGHTCOVE_CMS_URL = 'https://cms.api.brightcove.com/v1';
 const BRIGHTCOVE_ACCOUNT_ID = '659677170001';
 const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com';
 const OUTPUT_SUFFIX_PATH = 'assets/video';
-const MAX_CONCURRENT_VIDEOS = 5;
+const MAX_CONCURRENT_VIDEOS = 10;
 const SKIP_EXISTING_FILES = true;
 
 const getAuthHeader = () => {
