@@ -1,4 +1,4 @@
-"db_name","video_id","site_id","webroot","bc_id"
+"db_name,""video_id"",""site_id"",""webroot"",""bc_id"""
 repsites_amare,5025,72,webroot_amare,"5522235072001"
 repsites_amare,5026,72,webroot_amare,"5522231354001"
 repsites_amare,5027,72,webroot_amare,"5522258059001"
