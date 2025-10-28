@@ -49,11 +49,14 @@ const escapeCsvField = (field) => {
   return `"${stringField.replace(/"/g, '""')}"`;
 };
 
-const discoverAndSaveAllVideos = async (accessToken, maxVideos = null) => {
+const discoverAndSaveAllVideos = async (initialAccessToken, maxVideos = null) => {
   let offset = 0;
   const limit = 100; // Brightcove API max per request
   let hasMoreVideos = true;
   let totalDiscovered = 0;
+  let accessToken = initialAccessToken;
+  let tokenRefreshCount = 0;
+  const MAX_TOKEN_REFRESHES = 5; // Prevent infinite loops
 
   console.log('Starting video discovery from Brightcove...');
   if (maxVideos) {
@@ -86,6 +89,9 @@ const discoverAndSaveAllVideos = async (accessToken, maxVideos = null) => {
 
       const videos = response.data;
       
+      // Reset token refresh count on successful request
+      tokenRefreshCount = 0;
+      
       if (videos.length === 0) {
         hasMoreVideos = false;
       } else {
@@ -110,7 +116,12 @@ const discoverAndSaveAllVideos = async (accessToken, maxVideos = null) => {
         }
         
         offset += videos.length;
-        console.log(`Discovered ${totalDiscovered} videos so far...`);
+        
+        // Show progress less frequently for large datasets
+        const progressInterval = totalDiscovered < 1000 ? 100 : 500;
+        if (totalDiscovered % progressInterval === 0 || (maxVideos && totalDiscovered >= maxVideos)) {
+          console.log(`Discovered ${totalDiscovered} videos so far...`);
+        }
         
         // Check if we've reached the limit after processing the batch
         if (maxVideos && totalDiscovered >= maxVideos) {
@@ -118,12 +129,36 @@ const discoverAndSaveAllVideos = async (accessToken, maxVideos = null) => {
         }
       }
     } catch (error) {
-      console.error(`Error fetching videos at offset ${offset}:`, error.message);
-      throw error;
+      if (isTokenExpiredError(error)) {
+        tokenRefreshCount++;
+        if (tokenRefreshCount > MAX_TOKEN_REFRESHES) {
+          console.error(`❌ Maximum token refresh attempts (${MAX_TOKEN_REFRESHES}) exceeded. Stopping discovery.`);
+          throw new Error(`Too many token refresh attempts. Original error: ${error.message}`);
+        }
+        
+        console.log(`\n⚠️  Access token expired at offset ${offset} (refresh attempt ${tokenRefreshCount}/${MAX_TOKEN_REFRESHES}). Refreshing token...`);
+        try {
+          // Add a small delay to avoid rate limiting
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          accessToken = await getAccessToken();
+          console.log(`✅ Token refreshed successfully. Retrying from offset ${offset}...`);
+          // Don't increment offset, retry the same batch
+          continue;
+        } catch (tokenError) {
+          console.error(`❌ Failed to refresh access token:`, tokenError.message);
+          throw tokenError;
+        }
+      } else {
+        console.error(`Error fetching videos at offset ${offset}:`, error.message);
+        throw error;
+      }
     }
   }
 
   console.log(`\nTotal videos discovered and saved: ${totalDiscovered}`);
+  if (tokenRefreshCount > 0) {
+    console.log(`🔄 Access token was refreshed ${tokenRefreshCount} time(s) during discovery`);
+  }
   return totalDiscovered;
 };
 
