@@ -198,7 +198,7 @@ const parseCsvLine = (line) => {
   return fields;
 };
 
-const readDiscoveryCsv = () => {
+const readDiscoveryCsv = (includeDownloaded = false) => {
   if (!fs.existsSync(DISCOVERY_CSV_PATH)) {
     throw new Error(`Discovery CSV not found at ${DISCOVERY_CSV_PATH}. Please run discovery phase first.`);
   }
@@ -217,8 +217,8 @@ const readDiscoveryCsv = () => {
       if (fields.length >= 10) {
         const [bc_id, name, created_at, duration, tags, description, is_downloaded, download_date, file_name, container] = fields;
         
-        // Only include videos that haven't been downloaded yet
-        if (is_downloaded !== 'true') {
+        // Include videos based on includeDownloaded flag
+        if (includeDownloaded || is_downloaded !== 'true') {
           videos.push({
             bc_id: bc_id.trim(),
             name: name.trim(),
@@ -343,7 +343,7 @@ const downloadThumbnail = async (thumbnailUrl, bcId, outputDir) => {
   // Extract file extension from URL or default to jpg
   const urlParts = thumbnailUrl.split('.');
   const extension = urlParts.length > 1 ? urlParts[urlParts.length - 1].split('?')[0] : 'jpg';
-  const thumbnailFileName = `${bcId}_thumbnail.${extension}`;
+  const thumbnailFileName = `${bcId}.${extension}`;
   const thumbnailPath = path.join(outputDir, thumbnailFileName);
   
   if (SKIP_EXISTING_FILES && fs.existsSync(thumbnailPath)) {
@@ -395,6 +395,68 @@ const getThumbnailUrl = (metadata) => {
   } catch (error) {
     console.warn('Failed to extract thumbnail URL from metadata:', error.message);
     return null;
+  }
+};
+
+const getPosterUrl = (metadata) => {
+  try {
+    return metadata?.images?.poster?.src || null;
+  } catch (error) {
+    console.warn('Failed to extract poster URL from metadata:', error.message);
+    return null;
+  }
+};
+
+const getMetadataFromJsonFile = (bcId, created_at) => {
+  // Extract year and month from created_at date
+  const createdDate = new Date(created_at);
+  const year = createdDate.getFullYear();
+  const month = String(createdDate.getMonth() + 1).padStart(2, '0');
+  
+  // Construct metadata file path
+  const metadataPath = path.join(OUTPUT_BASE_PATH, String(year), month, `${bcId}.json`);
+  
+  if (!fs.existsSync(metadataPath)) {
+    return null;
+  }
+  
+  try {
+    const metadataContent = fs.readFileSync(metadataPath, 'utf-8');
+    return JSON.parse(metadataContent);
+  } catch (error) {
+    console.warn(`Failed to read metadata file for ${bcId}: ${error.message}`);
+    return null;
+  }
+};
+
+const downloadPoster = async (posterUrl, bcId, outputDir) => {
+  if (!posterUrl) {
+    return { path: null, skipped: true };
+  }
+  
+  // Extract file extension from URL or default to jpg
+  const urlParts = posterUrl.split('.');
+  const extension = urlParts.length > 1 ? urlParts[urlParts.length - 1].split('?')[0] : 'jpg';
+  const posterFileName = `${bcId}_poster.${extension}`;
+  const posterPath = path.join(outputDir, posterFileName);
+  
+  if (SKIP_EXISTING_FILES && fs.existsSync(posterPath)) {
+    console.log(`Poster already exists, skipping download: ${posterPath}`);
+    return { path: posterPath, skipped: true };
+  }
+  
+  try {
+    const response = await axios({
+      method: 'get',
+      url: posterUrl,
+      responseType: 'stream'
+    });
+
+    await pipeline(response.data, fs.createWriteStream(posterPath));
+    return { path: posterPath, skipped: false };
+  } catch (error) {
+    console.warn(`Failed to download poster for ${bcId}: ${error.message}`);
+    return { path: null, skipped: false, error: error.message };
   }
 };
 
@@ -718,6 +780,144 @@ const runDownload = async () => {
   return results;
 };
 
+const processPosterForVideo = async (videoInfo) => {
+  const { bc_id, name, created_at } = videoInfo;
+
+  if (!bc_id || bc_id === "") {
+    return { success: false, bc_id, error: 'Empty bc_id' };
+  }
+
+  // Extract year and month from created_at date
+  const createdDate = new Date(created_at);
+  const year = createdDate.getFullYear();
+  const month = String(createdDate.getMonth() + 1).padStart(2, '0');
+  
+  // Construct output directory
+  const outputDir = path.join(OUTPUT_BASE_PATH, String(year), month);
+  
+  // Check if metadata JSON file exists
+  const metadata = getMetadataFromJsonFile(bc_id, created_at);
+  if (!metadata) {
+    return { success: false, bc_id, error: `Metadata JSON not found for ${bc_id}` };
+  }
+
+  // Get poster URL from metadata
+  const posterUrl = getPosterUrl(metadata);
+  if (!posterUrl) {
+    return { success: false, bc_id, error: 'No poster URL in metadata' };
+  }
+
+  // Download poster
+  const posterResult = await downloadPoster(posterUrl, bc_id, outputDir);
+  
+  if (posterResult.skipped) {
+    return { success: true, bc_id, name, skipped: true };
+  } else if (posterResult.path) {
+    return { success: true, bc_id, name, posterPath: posterResult.path, skipped: false };
+  } else {
+    return { success: false, bc_id, error: posterResult.error || 'Failed to download poster' };
+  }
+};
+
+const runDownloadPoster = async () => {
+  console.log('=== PHASE 3: POSTER DOWNLOAD ===');
+  console.log(`Skip existing files: ${SKIP_EXISTING_FILES ? 'ENABLED' : 'DISABLED'}`);
+  console.log(`Max concurrent videos: ${MAX_CONCURRENT_VIDEOS}`);
+  console.log(`Processing timeout: ${MAX_PROCESSING_TIME_MS / 1000 / 60} minutes per video`);
+  console.log(`Output path: ${OUTPUT_BASE_PATH}/YYYY/MM/`);
+  
+  // Read all videos from discovery CSV (including downloaded ones)
+  console.log(`\nReading from discovery CSV: ${DISCOVERY_CSV_PATH}`);
+  const videoList = readDiscoveryCsv(true); // Include downloaded videos
+  console.log(`Found ${videoList.length} videos to check for poster download`);
+  
+  if (videoList.length === 0) {
+    console.log('\nNo videos found in discovery CSV!');
+    return [];
+  }
+
+  // Process videos with concurrency
+  const results = [];
+  let inProgress = 0;
+  let currentIndex = 0;
+  let completedCount = 0;
+  const totalVideos = videoList.length;
+
+  return new Promise((resolve) => {
+    const processNext = async () => {
+      // Check if we're completely done
+      if (currentIndex >= totalVideos && inProgress === 0) {
+        console.log(`\nAll ${totalVideos} videos processed!`);
+        resolve(results);
+        return;
+      }
+
+      // Fill empty slots up to MAX_CONCURRENT_VIDEOS
+      while (inProgress < MAX_CONCURRENT_VIDEOS && currentIndex < totalVideos) {
+        const videoInfo = videoList[currentIndex];
+        const videoIndex = currentIndex;
+        currentIndex++;
+        inProgress++;
+
+        console.log(`[${new Date().toISOString()}] Starting poster check ${videoIndex + 1}/${totalVideos}: ${videoInfo.bc_id} (${inProgress} in progress)`);
+
+        // Process poster with timeout (non-blocking)
+        Promise.race([
+          processPosterForVideo(videoInfo),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`Timeout: Poster ${videoInfo.bc_id} exceeded ${MAX_PROCESSING_TIME_MS / 1000 / 60} minutes`)), MAX_PROCESSING_TIME_MS)
+          )
+        ])
+          .then(result => {
+            results.push(result);
+            inProgress--;
+            completedCount++;
+
+            const successStr = result.success ? '✓' : '✗';
+            const statusStr = result.skipped ? ' (skipped)' : '';
+            console.log(`[${new Date().toISOString()}] ${successStr} Completed ${completedCount}/${totalVideos}: ${videoInfo.bc_id}${statusStr} (${inProgress} still in progress)`);
+
+            // Immediately try to start the next video
+            processNext();
+          })
+          .catch(error => {
+            const errorType = error.message.includes('Timeout') ? '⏱ TIMEOUT' : '✗ ERROR';
+            console.error(`[${new Date().toISOString()}] ${errorType} processing poster ${videoIndex + 1}: ${videoInfo.bc_id} - ${error.message}`);
+            results.push({ success: false, bc_id: videoInfo.bc_id, error: error.message });
+            inProgress--;
+            completedCount++;
+
+            // Continue processing even after error
+            processNext();
+          });
+      }
+    };
+
+    // Kick off the initial batch
+    console.log(`Starting rolling queue with MAX_CONCURRENT_VIDEOS=${MAX_CONCURRENT_VIDEOS}`);
+    processNext();
+  }).then(results => {
+    const successCount = results.filter(r => r.success).length;
+    const failedCount = results.filter(r => !r.success).length;
+    const skippedCount = results.filter(r => r.success && r.skipped).length;
+    const downloadedCount = results.filter(r => r.success && !r.skipped).length;
+    const noMetadataCount = results.filter(r => !r.success && r.error && r.error.includes('Metadata JSON not found')).length;
+    const noPosterUrlCount = results.filter(r => !r.success && r.error && r.error.includes('No poster URL')).length;
+
+    console.log(`\n=== Poster Download Complete ===`);
+    console.log(`Total: ${results.length} videos`);
+    console.log(`Successful: ${successCount}`);
+    console.log(`  - Downloaded: ${downloadedCount}`);
+    console.log(`  - Skipped (already exist): ${skippedCount}`);
+    console.log(`Failed: ${failedCount}`);
+    console.log(`  - No metadata JSON: ${noMetadataCount}`);
+    console.log(`  - No poster URL: ${noPosterUrlCount}`);
+    console.log(`  - Other errors: ${failedCount - noMetadataCount - noPosterUrlCount}`);
+
+    return results;
+  });
+};
+
 const main = async () => {
   try {
     const mode = process.argv[2] || 'discover';
@@ -732,6 +932,8 @@ const main = async () => {
       await runDiscovery(maxVideos);
     } else if (mode === 'download') {
       await runDownload();
+    } else if (mode === 'download-poster') {
+      await runDownloadPoster();
     } else if (mode === 'all') {
       // Run both phases sequentially
       const maxVideos = maxVideosArg ? parseInt(maxVideosArg, 10) : null;
@@ -744,20 +946,26 @@ const main = async () => {
       await runDownload();
     } else {
       console.log('Usage:');
-      console.log('  node app.js discover [maxVideos]  - Discover videos and save to CSV');
-      console.log('                                      Optional: limit number of videos for testing');
-      console.log('  node app.js download              - Download videos, thumbnails, and metadata from CSV (resumable)');
-      console.log('  node app.js all [maxVideos]       - Run both phases sequentially');
+      console.log('  node app.js discover [maxVideos]     - Discover videos and save to CSV');
+      console.log('                                         Optional: limit number of videos for testing');
+      console.log('  node app.js download                 - Download videos, thumbnails, and metadata from CSV (resumable)');
+      console.log('  node app.js download-poster          - Download poster images from metadata JSON files');
+      console.log('                                         Processes all videos in CSV (including downloaded ones)');
+      console.log('                                         Only downloads if metadata JSON file exists');
+      console.log('  node app.js all [maxVideos]          - Run both phases sequentially');
       console.log('');
       console.log('Downloads include:');
       console.log('  - Video files (*.mp4, *.mov, etc.)');
       console.log('  - Thumbnail images (*_thumbnail.jpg)');
+      console.log('  - Poster images (*_poster.jpg)');
       console.log('  - Metadata JSON files (*.json)');
       console.log('');
       console.log('Examples:');
-      console.log('  node app.js discover              - Discover all videos');
-      console.log('  node app.js discover 50           - Discover only 50 videos for testing');
-      console.log('  node app.js all 100               - Discover 100 videos then download them');
+      console.log('  node app.js discover                 - Discover all videos');
+      console.log('  node app.js discover 50             - Discover only 50 videos for testing');
+      console.log('  node app.js download                 - Download videos, thumbnails, and metadata');
+      console.log('  node app.js download-poster           - Download poster images for all videos');
+      console.log('  node app.js all 100                   - Discover 100 videos then download them');
       process.exit(1);
     }
   } catch (error) {
