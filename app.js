@@ -12,7 +12,7 @@ const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com';
 // const OUTPUT_BASE_PATH = './s3';
 
 const OUTPUT_SUFFIX_PATH = 'assets/video';
-const MAX_CONCURRENT_VIDEOS = 80;
+const MAX_CONCURRENT_VIDEOS = 120;
 const MAX_CONCURRENT_POSTERS = 120;
 const MAX_PROCESSING_TIME_MS = 10 * 60 * 1000; // 10 minutes timeout
 const MAX_POSTER_PROCESSING_TIME_MS = 5 * 60 * 1000; // 5 minutes timeout for posters
@@ -681,7 +681,8 @@ const processThumbnail = async (videoInfo) => {
     bc_id,
     web_root,
     thumbnailDownloaded: false,
-    thumbnailSkipped: false
+    thumbnailSkipped: false,
+    skipped: true
   };
   
   // Extract and download thumbnail only
@@ -697,6 +698,7 @@ const processThumbnail = async (videoInfo) => {
     } else {
       console.log(`Thumbnail downloaded for ${bc_id} (${thumbnailExtension})`);
     }
+    result.skipped = false; // At least one thumbnail was processed
   } else {
     console.log(`No thumbnail URL found in metadata for ${bc_id}`);
     result.reason = 'No thumbnail URL in metadata';
@@ -885,6 +887,7 @@ const mainThumbnailDownload = async () => {
     const successCount = results.filter(r => r.success).length;
     const failedCount = results.filter(r => !r.success).length;
     const timeoutCount = results.filter(r => !r.success && r.error && r.error.includes('Timeout')).length;
+    const skippedCount = results.filter(r => r.success && (r.skipped || r.reason === 'No thumbnail URL in metadata')).length;
     const metadataNotFoundCount = results.filter(r => !r.success && r.error && r.error.includes('Metadata file not found')).length;
     const noThumbnailUrlCount = results.filter(r => r.success && r.reason === 'No thumbnail URL in metadata').length;
     const thumbnailDownloadedCount = results.filter(r => r.success && r.thumbnailDownloaded).length;
@@ -897,6 +900,7 @@ const mainThumbnailDownload = async () => {
     console.log(`  - Timeouts (>${MAX_POSTER_PROCESSING_TIME_MS / 1000 / 60} min): ${timeoutCount}`);
     console.log(`  - Metadata not found: ${metadataNotFoundCount}`);
     console.log(`  - Other errors: ${failedCount - timeoutCount - metadataNotFoundCount}`);
+    console.log(`Skipped (already exist or no thumbnail URL): ${skippedCount}`);
     console.log(`\nThumbnail Statistics:`);
     console.log(`  - Downloaded: ${thumbnailDownloadedCount}`);
     console.log(`  - Skipped (already exist): ${thumbnailSkippedCount}`);
