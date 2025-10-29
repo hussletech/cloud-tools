@@ -13,7 +13,7 @@ const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com';
 
 const OUTPUT_SUFFIX_PATH = 'assets/video';
 const MAX_CONCURRENT_VIDEOS = 80;
-const MAX_CONCURRENT_POSTERS = 80;
+const MAX_CONCURRENT_POSTERS = 120;
 const MAX_PROCESSING_TIME_MS = 10 * 60 * 1000; // 10 minutes timeout
 const MAX_POSTER_PROCESSING_TIME_MS = 5 * 60 * 1000; // 5 minutes timeout for posters
 const SKIP_EXISTING_FILES = true;
@@ -436,6 +436,24 @@ const getPosterUrlFromMetadata = (metadata) => {
   return null;
 };
 
+const getThumbnailUrlFromMetadata = (metadata) => {
+  if (!metadata || !metadata.images || !metadata.images.thumbnail) {
+    return null;
+  }
+  
+  // Use the src property from images.thumbnail
+  if (metadata?.images?.thumbnail?.src) {
+    return metadata.images.thumbnail.src;
+  }
+  
+  // Fallback to first source if available
+  if (metadata.images.thumbnail.sources && metadata.images.thumbnail.sources.length > 0) {
+    return metadata.images.thumbnail.sources[0].src;
+  }
+  
+  return null;
+};
+
 const readMetadataFile = (metadataPath) => {
   if (!fs.existsSync(metadataPath)) {
     throw new Error(`Metadata file not found: ${metadataPath}`);
@@ -464,53 +482,99 @@ const downloadPoster = async (posterUrl, bcId, extension, outputDir) => {
   return { path: posterPath, skipped: false };
 };
 
+const downloadThumbnail = async (thumbnailUrl, bcId, extension, outputDir) => {
+  const thumbnailFileName = `${bcId}_thumbnail.${extension}`;
+  const thumbnailPath = path.join(outputDir, thumbnailFileName);
+  
+  if (SKIP_EXISTING_FILES && fs.existsSync(thumbnailPath)) {
+    console.log(`Thumbnail file already exists, skipping download: ${thumbnailPath}`);
+    return { path: thumbnailPath, skipped: true };
+  }
+  
+  const response = await axios({
+    method: 'get',
+    url: thumbnailUrl,
+    responseType: 'stream'
+  });
+
+  await pipeline(response.data, fs.createWriteStream(thumbnailPath));
+  return { path: thumbnailPath, skipped: false };
+};
+
 const processPoster = async (videoInfo) => {
   const { bc_id, web_root } = videoInfo;
 
   if (!bc_id || bc_id === "" || !web_root || web_root === "") {
-    console.log(`Skipping poster with empty bc_id or web_root: bc_id=${bc_id}, web_root=${web_root}`);
+    console.log(`Skipping images with empty bc_id or web_root: bc_id=${bc_id}, web_root=${web_root}`);
     return null;
   }
 
-  console.log(`Processing poster: ${bc_id} for ${web_root}`);
+  console.log(`Processing images (poster & thumbnail): ${bc_id} for ${web_root}`);
   
   const outputDir = path.join(OUTPUT_BASE_PATH, web_root, OUTPUT_SUFFIX_PATH);
   const metadataPath = path.join(outputDir, `${bc_id}.json`);
   
   if (!fs.existsSync(metadataPath)) {
-    console.log(`Metadata file not found for ${bc_id}, skipping poster download: ${metadataPath}`);
+    console.log(`Metadata file not found for ${bc_id}, skipping image download: ${metadataPath}`);
     return null;
   }
   
   // Read metadata file
   const metadata = readMetadataFile(metadataPath);
   
-  // Extract poster URL from metadata
-  const posterUrl = getPosterUrlFromMetadata(metadata);
-  
-  if (!posterUrl) {
-    console.log(`No poster URL found in metadata for ${bc_id}`);
-    return { bc_id, web_root, skipped: true, reason: 'No poster URL in metadata' };
-  }
-  
-  // Determine extension from URL
-  const extension = getExtensionFromUrl(posterUrl);
-  
-  // Download poster
-  const posterResult = await downloadPoster(posterUrl, bc_id, extension, outputDir);
-  if (posterResult.skipped) {
-    console.log(`Poster already exists for ${bc_id}, skipped download`);
-  } else {
-    console.log(`Poster downloaded for ${bc_id} (${extension})`);
-  }
-  
-  return {
+  const result = {
     bc_id,
     web_root,
-    posterPath: posterResult.path,
-    extension,
-    skipped: posterResult.skipped
+    posterDownloaded: false,
+    posterSkipped: false,
+    thumbnailDownloaded: false,
+    thumbnailSkipped: false,
+    skipped: true
   };
+  
+  // Extract and download poster
+  const posterUrl = getPosterUrlFromMetadata(metadata);
+  if (posterUrl) {
+    const posterExtension = getExtensionFromUrl(posterUrl);
+    const posterResult = await downloadPoster(posterUrl, bc_id, posterExtension, outputDir);
+    result.posterPath = posterResult.path;
+    result.posterSkipped = posterResult.skipped;
+    result.posterDownloaded = !posterResult.skipped;
+    if (posterResult.skipped) {
+      console.log(`Poster already exists for ${bc_id}, skipped download`);
+    } else {
+      console.log(`Poster downloaded for ${bc_id} (${posterExtension})`);
+    }
+    result.skipped = false; // At least one image was processed
+  } else {
+    console.log(`No poster URL found in metadata for ${bc_id}`);
+  }
+  
+  // Extract and download thumbnail
+  const thumbnailUrl = getThumbnailUrlFromMetadata(metadata);
+  if (thumbnailUrl) {
+    const thumbnailExtension = getExtensionFromUrl(thumbnailUrl);
+    const thumbnailResult = await downloadThumbnail(thumbnailUrl, bc_id, thumbnailExtension, outputDir);
+    result.thumbnailPath = thumbnailResult.path;
+    result.thumbnailSkipped = thumbnailResult.skipped;
+    result.thumbnailDownloaded = !thumbnailResult.skipped;
+    if (thumbnailResult.skipped) {
+      console.log(`Thumbnail already exists for ${bc_id}, skipped download`);
+    } else {
+      console.log(`Thumbnail downloaded for ${bc_id} (${thumbnailExtension})`);
+    }
+    result.skipped = false; // At least one image was processed
+  } else {
+    console.log(`No thumbnail URL found in metadata for ${bc_id}`);
+  }
+  
+  // If neither poster nor thumbnail was found, mark as skipped
+  if (!posterUrl && !thumbnailUrl) {
+    result.reason = 'No poster or thumbnail URL in metadata';
+    return result;
+  }
+  
+  return result;
 };
 
 const processSinglePoster = async (videoInfo) => {
@@ -519,7 +583,7 @@ const processSinglePoster = async (videoInfo) => {
     
     return { success: true, ...result };
   } catch (error) {
-    console.error(`Failed to process poster for ${videoInfo.bc_id}:`, error.message);
+    console.error(`Failed to process images for ${videoInfo.bc_id}:`, error.message);
     return { success: false, bc_id: videoInfo.bc_id, error: error.message };
   }
 };
@@ -528,7 +592,7 @@ const processPosterWithTimeout = async (videoInfo) => {
   return Promise.race([
     processSinglePoster(videoInfo),
     new Promise((_, reject) => 
-      setTimeout(() => reject(new Error(`Timeout: Poster ${videoInfo.bc_id} exceeded ${MAX_POSTER_PROCESSING_TIME_MS / 1000 / 60} minutes`)), MAX_POSTER_PROCESSING_TIME_MS)
+      setTimeout(() => reject(new Error(`Timeout: Images ${videoInfo.bc_id} exceeded ${MAX_POSTER_PROCESSING_TIME_MS / 1000 / 60} minutes`)), MAX_POSTER_PROCESSING_TIME_MS)
     )
   ]);
 };
@@ -538,27 +602,27 @@ const processAllPosters = async (videoList) => {
   let inProgress = 0;
   let currentIndex = 0;
   let completedCount = 0;
-  const totalPosters = videoList.length;
+  const totalVideos = videoList.length;
   
   return new Promise((resolve) => {
     const processNext = async () => {
       // Check if we're completely done
-      if (currentIndex >= totalPosters && inProgress === 0) {
-        console.log(`\nAll ${totalPosters} posters processed!`);
+      if (currentIndex >= totalVideos && inProgress === 0) {
+        console.log(`\nAll ${totalVideos} videos processed for images!`);
         resolve(results);
         return;
       }
       
       // Fill empty slots up to MAX_CONCURRENT_POSTERS
-      while (inProgress < MAX_CONCURRENT_POSTERS && currentIndex < totalPosters) {
+      while (inProgress < MAX_CONCURRENT_POSTERS && currentIndex < totalVideos) {
         const videoInfo = videoList[currentIndex];
-        const posterIndex = currentIndex;
+        const videoIndex = currentIndex;
         currentIndex++;
         inProgress++;
         
-        console.log(`[${new Date().toISOString()}] Starting poster ${posterIndex + 1}/${totalPosters}: ${videoInfo.bc_id} (${inProgress} in progress)`);
+        console.log(`[${new Date().toISOString()}] Starting images ${videoIndex + 1}/${totalVideos}: ${videoInfo.bc_id} (${inProgress} in progress)`);
         
-        // Start processing this poster with timeout (non-blocking)
+        // Start processing this video's images with timeout (non-blocking)
         processPosterWithTimeout(videoInfo)
           .then(result => {
             results.push(result);
@@ -566,14 +630,14 @@ const processAllPosters = async (videoList) => {
             completedCount++;
             
             const successStr = result.success ? '✓' : '✗';
-            console.log(`[${new Date().toISOString()}] ${successStr} Completed ${completedCount}/${totalPosters}: ${videoInfo.bc_id} (${inProgress} still in progress)`);
+            console.log(`[${new Date().toISOString()}] ${successStr} Completed ${completedCount}/${totalVideos}: ${videoInfo.bc_id} (${inProgress} still in progress)`);
             
-            // Immediately try to start the next poster
+            // Immediately try to start the next video
             processNext();
           })
           .catch(error => {
             const errorType = error.message.includes('Timeout') ? '⏱ TIMEOUT' : '✗ ERROR';
-            console.error(`[${new Date().toISOString()}] ${errorType} processing poster ${posterIndex + 1}: ${videoInfo.bc_id} - ${error.message}`);
+            console.error(`[${new Date().toISOString()}] ${errorType} processing images ${videoIndex + 1}: ${videoInfo.bc_id} - ${error.message}`);
             results.push({ success: false, bc_id: videoInfo.bc_id, error: error.message });
             inProgress--;
             completedCount++;
@@ -633,33 +697,42 @@ const main = async () => {
 
 const mainPosterDownload = async () => {
   try {
-    console.log('Starting Brightcove poster download...');
+    console.log('Starting Brightcove image download (poster & thumbnail)...');
     console.log(`Skip existing files: ${SKIP_EXISTING_FILES ? 'ENABLED' : 'DISABLED'}`);
-    console.log(`Max concurrent posters: ${MAX_CONCURRENT_POSTERS}`);
-    console.log(`Processing timeout: ${MAX_POSTER_PROCESSING_TIME_MS / 1000 / 60} minutes per poster`);
+    console.log(`Max concurrent downloads: ${MAX_CONCURRENT_POSTERS}`);
+    console.log(`Processing timeout: ${MAX_POSTER_PROCESSING_TIME_MS / 1000 / 60} minutes per video`);
     console.log(`Output path: ${OUTPUT_BASE_PATH}/{webroot}/${OUTPUT_SUFFIX_PATH}`);
     
     const videoList = readCsvFile(CSV_FILE_PATH);
-    console.log(`Found ${videoList.length} videos to process for posters`);
+    console.log(`Found ${videoList.length} videos to process for images`);
     
     const results = await processAllPosters(videoList);
     
     const successCount = results.filter(r => r.success).length;
     const failedCount = results.filter(r => !r.success).length;
     const timeoutCount = results.filter(r => !r.success && r.error && r.error.includes('Timeout')).length;
-    const skippedCount = results.filter(r => r.success && (r.skipped || r.reason === 'No poster URL in metadata')).length;
+    const skippedCount = results.filter(r => r.success && (r.skipped || r.reason === 'No poster or thumbnail URL in metadata')).length;
     const metadataNotFoundCount = results.filter(r => !r.success && r.error && r.error.includes('Metadata file not found')).length;
-    const noPosterUrlCount = results.filter(r => r.success && r.reason === 'No poster URL in metadata').length;
+    const noImageUrlCount = results.filter(r => r.success && r.reason === 'No poster or thumbnail URL in metadata').length;
+    const posterDownloadedCount = results.filter(r => r.success && r.posterDownloaded).length;
+    const posterSkippedCount = results.filter(r => r.success && r.posterSkipped).length;
+    const thumbnailDownloadedCount = results.filter(r => r.success && r.thumbnailDownloaded).length;
+    const thumbnailSkippedCount = results.filter(r => r.success && r.thumbnailSkipped).length;
     
-    console.log(`\n=== Poster Download Complete ===`);
+    console.log(`\n=== Image Download Complete ===`);
     console.log(`Total: ${results.length} videos`);
     console.log(`Successful: ${successCount}`);
     console.log(`Failed: ${failedCount}`);
     console.log(`  - Timeouts (>${MAX_POSTER_PROCESSING_TIME_MS / 1000 / 60} min): ${timeoutCount}`);
     console.log(`  - Metadata not found: ${metadataNotFoundCount}`);
     console.log(`  - Other errors: ${failedCount - timeoutCount - metadataNotFoundCount}`);
-    console.log(`Skipped (already exist or no poster URL): ${skippedCount}`);
-    console.log(`  - No poster URL in metadata: ${noPosterUrlCount}`);
+    console.log(`\nPoster Statistics:`);
+    console.log(`  - Downloaded: ${posterDownloadedCount}`);
+    console.log(`  - Skipped (already exist): ${posterSkippedCount}`);
+    console.log(`\nThumbnail Statistics:`);
+    console.log(`  - Downloaded: ${thumbnailDownloadedCount}`);
+    console.log(`  - Skipped (already exist): ${thumbnailSkippedCount}`);
+    console.log(`\nSkipped (no URLs in metadata): ${noImageUrlCount}`);
     
     return results;
   } catch (error) {
@@ -688,14 +761,14 @@ Usage: node app.js [OPTIONS]
 
 Options:
   --video, -v    Run video and metadata download only
-  --poster, -p   Run poster download only
-  --all, -a      Run both video and poster download (default)
+  --poster, -p   Run poster and thumbnail download only
+  --all, -a      Run both video and image download (default)
   --help, -h     Show this help message
 
 Examples:
   node app.js --video   # Download videos and metadata only
-  node app.js --poster  # Download posters only
-  node app.js --all     # Download everything (default)
+  node app.js --poster  # Download posters and thumbnails only
+  node app.js --all     # Download everything (videos, metadata, posters, thumbnails)
       `);
       process.exit(0);
     }
