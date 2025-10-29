@@ -654,6 +654,134 @@ const processAllPosters = async (videoList) => {
   });
 };
 
+// ==================== THUMBNAIL ONLY DOWNLOAD FUNCTIONS ====================
+
+const processThumbnail = async (videoInfo) => {
+  const { bc_id, web_root } = videoInfo;
+
+  if (!bc_id || bc_id === "" || !web_root || web_root === "") {
+    console.log(`Skipping thumbnail with empty bc_id or web_root: bc_id=${bc_id}, web_root=${web_root}`);
+    return null;
+  }
+
+  console.log(`Processing thumbnail: ${bc_id} for ${web_root}`);
+  
+  const outputDir = path.join(OUTPUT_BASE_PATH, web_root, OUTPUT_SUFFIX_PATH);
+  const metadataPath = path.join(outputDir, `${bc_id}.json`);
+  
+  if (!fs.existsSync(metadataPath)) {
+    console.log(`Metadata file not found for ${bc_id}, skipping thumbnail download: ${metadataPath}`);
+    return null;
+  }
+  
+  // Read metadata file
+  const metadata = readMetadataFile(metadataPath);
+  
+  const result = {
+    bc_id,
+    web_root,
+    thumbnailDownloaded: false,
+    thumbnailSkipped: false
+  };
+  
+  // Extract and download thumbnail only
+  const thumbnailUrl = getThumbnailUrlFromMetadata(metadata);
+  if (thumbnailUrl) {
+    const thumbnailExtension = getExtensionFromUrl(thumbnailUrl);
+    const thumbnailResult = await downloadThumbnail(thumbnailUrl, bc_id, thumbnailExtension, outputDir);
+    result.thumbnailPath = thumbnailResult.path;
+    result.thumbnailSkipped = thumbnailResult.skipped;
+    result.thumbnailDownloaded = !thumbnailResult.skipped;
+    if (thumbnailResult.skipped) {
+      console.log(`Thumbnail already exists for ${bc_id}, skipped download`);
+    } else {
+      console.log(`Thumbnail downloaded for ${bc_id} (${thumbnailExtension})`);
+    }
+  } else {
+    console.log(`No thumbnail URL found in metadata for ${bc_id}`);
+    result.reason = 'No thumbnail URL in metadata';
+  }
+  
+  return result;
+};
+
+const processSingleThumbnail = async (videoInfo) => {
+  try {
+    const result = await processThumbnail(videoInfo);
+    
+    return { success: true, ...result };
+  } catch (error) {
+    console.error(`Failed to process thumbnail for ${videoInfo.bc_id}:`, error.message);
+    return { success: false, bc_id: videoInfo.bc_id, error: error.message };
+  }
+};
+
+const processThumbnailWithTimeout = async (videoInfo) => {
+  return Promise.race([
+    processSingleThumbnail(videoInfo),
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error(`Timeout: Thumbnail ${videoInfo.bc_id} exceeded ${MAX_POSTER_PROCESSING_TIME_MS / 1000 / 60} minutes`)), MAX_POSTER_PROCESSING_TIME_MS)
+    )
+  ]);
+};
+
+const processAllThumbnails = async (videoList) => {
+  const results = [];
+  let inProgress = 0;
+  let currentIndex = 0;
+  let completedCount = 0;
+  const totalVideos = videoList.length;
+  
+  return new Promise((resolve) => {
+    const processNext = async () => {
+      // Check if we're completely done
+      if (currentIndex >= totalVideos && inProgress === 0) {
+        console.log(`\nAll ${totalVideos} videos processed for thumbnails!`);
+        resolve(results);
+        return;
+      }
+      
+      // Fill empty slots up to MAX_CONCURRENT_POSTERS
+      while (inProgress < MAX_CONCURRENT_POSTERS && currentIndex < totalVideos) {
+        const videoInfo = videoList[currentIndex];
+        const videoIndex = currentIndex;
+        currentIndex++;
+        inProgress++;
+        
+        console.log(`[${new Date().toISOString()}] Starting thumbnail ${videoIndex + 1}/${totalVideos}: ${videoInfo.bc_id} (${inProgress} in progress)`);
+        
+        // Start processing this video's thumbnail with timeout (non-blocking)
+        processThumbnailWithTimeout(videoInfo)
+          .then(result => {
+            results.push(result);
+            inProgress--;
+            completedCount++;
+            
+            const successStr = result.success ? '✓' : '✗';
+            console.log(`[${new Date().toISOString()}] ${successStr} Completed ${completedCount}/${totalVideos}: ${videoInfo.bc_id} (${inProgress} still in progress)`);
+            
+            // Immediately try to start the next video
+            processNext();
+          })
+          .catch(error => {
+            const errorType = error.message.includes('Timeout') ? '⏱ TIMEOUT' : '✗ ERROR';
+            console.error(`[${new Date().toISOString()}] ${errorType} processing thumbnail ${videoIndex + 1}: ${videoInfo.bc_id} - ${error.message}`);
+            results.push({ success: false, bc_id: videoInfo.bc_id, error: error.message });
+            inProgress--;
+            completedCount++;
+            
+            // Continue processing even after error
+            processNext();
+          });
+      }
+    };
+    
+    // Kick off the initial batch
+    console.log(`Starting rolling queue with MAX_CONCURRENT_POSTERS=${MAX_CONCURRENT_POSTERS}`);
+    processNext();
+  });
+};
+
 const main = async () => {
   try {
     console.log('Starting Brightcove video migration...');
@@ -741,11 +869,51 @@ const mainPosterDownload = async () => {
   }
 };
 
+const mainThumbnailDownload = async () => {
+  try {
+    console.log('Starting Brightcove thumbnail download...');
+    console.log(`Skip existing files: ${SKIP_EXISTING_FILES ? 'ENABLED' : 'DISABLED'}`);
+    console.log(`Max concurrent downloads: ${MAX_CONCURRENT_POSTERS}`);
+    console.log(`Processing timeout: ${MAX_POSTER_PROCESSING_TIME_MS / 1000 / 60} minutes per video`);
+    console.log(`Output path: ${OUTPUT_BASE_PATH}/{webroot}/${OUTPUT_SUFFIX_PATH}`);
+    
+    const videoList = readCsvFile(CSV_FILE_PATH);
+    console.log(`Found ${videoList.length} videos to process for thumbnails`);
+    
+    const results = await processAllThumbnails(videoList);
+    
+    const successCount = results.filter(r => r.success).length;
+    const failedCount = results.filter(r => !r.success).length;
+    const timeoutCount = results.filter(r => !r.success && r.error && r.error.includes('Timeout')).length;
+    const metadataNotFoundCount = results.filter(r => !r.success && r.error && r.error.includes('Metadata file not found')).length;
+    const noThumbnailUrlCount = results.filter(r => r.success && r.reason === 'No thumbnail URL in metadata').length;
+    const thumbnailDownloadedCount = results.filter(r => r.success && r.thumbnailDownloaded).length;
+    const thumbnailSkippedCount = results.filter(r => r.success && r.thumbnailSkipped).length;
+    
+    console.log(`\n=== Thumbnail Download Complete ===`);
+    console.log(`Total: ${results.length} videos`);
+    console.log(`Successful: ${successCount}`);
+    console.log(`Failed: ${failedCount}`);
+    console.log(`  - Timeouts (>${MAX_POSTER_PROCESSING_TIME_MS / 1000 / 60} min): ${timeoutCount}`);
+    console.log(`  - Metadata not found: ${metadataNotFoundCount}`);
+    console.log(`  - Other errors: ${failedCount - timeoutCount - metadataNotFoundCount}`);
+    console.log(`\nThumbnail Statistics:`);
+    console.log(`  - Downloaded: ${thumbnailDownloadedCount}`);
+    console.log(`  - Skipped (already exist): ${thumbnailSkippedCount}`);
+    console.log(`  - No thumbnail URL in metadata: ${noThumbnailUrlCount}`);
+    
+    return results;
+  } catch (error) {
+    console.error('Fatal error:', error.message);
+    process.exit(1);
+  }
+};
+
 // Command-line argument parsing
 const getCommandLineArgs = () => {
   const args = process.argv.slice(2);
   const options = {
-    step: 'all', // 'video', 'poster', or 'all'
+    step: 'all', // 'video', 'poster', 'thumbnail', or 'all'
   };
   
   args.forEach(arg => {
@@ -753,6 +921,8 @@ const getCommandLineArgs = () => {
       options.step = 'video';
     } else if (arg === '--poster' || arg === '-p') {
       options.step = 'poster';
+    } else if (arg === '--thumbnail' || arg === '-t') {
+      options.step = 'thumbnail';
     } else if (arg === '--all' || arg === '-a') {
       options.step = 'all';
     } else if (arg === '--help' || arg === '-h') {
@@ -760,15 +930,17 @@ const getCommandLineArgs = () => {
 Usage: node app.js [OPTIONS]
 
 Options:
-  --video, -v    Run video and metadata download only
-  --poster, -p   Run poster and thumbnail download only
-  --all, -a      Run both video and image download (default)
-  --help, -h     Show this help message
+  --video, -v       Run video and metadata download only
+  --poster, -p      Run poster and thumbnail download only
+  --thumbnail, -t   Run thumbnail download only
+  --all, -a         Run both video and image download (default)
+  --help, -h        Show this help message
 
 Examples:
-  node app.js --video   # Download videos and metadata only
-  node app.js --poster  # Download posters and thumbnails only
-  node app.js --all     # Download everything (videos, metadata, posters, thumbnails)
+  node app.js --video      # Download videos and metadata only
+  node app.js --poster     # Download posters and thumbnails only
+  node app.js --thumbnail  # Download thumbnails only
+  node app.js --all        # Download everything (videos, metadata, posters, thumbnails)
       `);
       process.exit(0);
     }
@@ -793,6 +965,10 @@ const run = async () => {
         console.log('='.repeat(50) + '\n');
       }
       await mainPosterDownload();
+    }
+    
+    if (options.step === 'thumbnail') {
+      await mainThumbnailDownload();
     }
   } catch (error) {
     console.error('Fatal error:', error.message);
