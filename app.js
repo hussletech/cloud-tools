@@ -5,7 +5,7 @@ const path = require('path');
 const { pipeline } = require('stream/promises');
 
 const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com/brightcove-videos';
-const MAX_CONCURRENT_VIDEOS = 30;
+const MAX_CONCURRENT_VIDEOS = 60;
 const MAX_PROCESSING_TIME_MS = 10 * 60 * 1000; // 10 minutes timeout
 const SKIP_EXISTING_FILES = true;
 const DISCOVERY_CSV_PATH = path.join(OUTPUT_BASE_PATH, 'brightcove-discovery.csv');
