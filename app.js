@@ -13,7 +13,9 @@ const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com';
 
 const OUTPUT_SUFFIX_PATH = 'assets/video';
 const MAX_CONCURRENT_VIDEOS = 20;
+const MAX_CONCURRENT_POSTERS = 80;
 const MAX_PROCESSING_TIME_MS = 10 * 60 * 1000; // 10 minutes timeout
+const MAX_POSTER_PROCESSING_TIME_MS = 5 * 60 * 1000; // 5 minutes timeout for posters
 const SKIP_EXISTING_FILES = true;
 const OUTPUT_CSV_PATH = './output-bc-migration.csv';
 const BRIGHTCOVE_OAUTH_URL = 'https://oauth.brightcove.com/v4/access_token';
@@ -402,6 +404,192 @@ const processAllVideos = async (videoList, initialAccessToken) => {
   });
 };
 
+// ==================== POSTER DOWNLOAD FUNCTIONS ====================
+
+const getExtensionFromUrl = (url) => {
+  try {
+    // Extract extension from URL, default to jpg if not found
+    const urlPath = new URL(url).pathname;
+    const match = urlPath.match(/\.(jpg|jpeg|png|gif|webp)$/i);
+    return match ? match[1].toLowerCase() : 'jpg';
+  } catch (error) {
+    // Default to jpg if URL parsing fails
+    return 'jpg';
+  }
+};
+
+const getPosterUrlFromMetadata = (metadata) => {
+  if (!metadata || !metadata.images || !metadata.images.poster) {
+    return null;
+  }
+  
+  // Use the src property from images.poster
+  if (metadata?.images?.poster?.src) {
+    return metadata.images.poster.src;
+  }
+  
+  // Fallback to first source if available
+  if (metadata.images.poster.sources && metadata.images.poster.sources.length > 0) {
+    return metadata.images.poster.sources[0].src;
+  }
+  
+  return null;
+};
+
+const readMetadataFile = (metadataPath) => {
+  if (!fs.existsSync(metadataPath)) {
+    throw new Error(`Metadata file not found: ${metadataPath}`);
+  }
+  
+  const fileContent = fs.readFileSync(metadataPath, 'utf-8');
+  return JSON.parse(fileContent);
+};
+
+const downloadPoster = async (posterUrl, bcId, extension, outputDir) => {
+  const posterFileName = `${bcId}_poster.${extension}`;
+  const posterPath = path.join(outputDir, posterFileName);
+  
+  if (SKIP_EXISTING_FILES && fs.existsSync(posterPath)) {
+    console.log(`Poster file already exists, skipping download: ${posterPath}`);
+    return { path: posterPath, skipped: true };
+  }
+  
+  const response = await axios({
+    method: 'get',
+    url: posterUrl,
+    responseType: 'stream'
+  });
+
+  await pipeline(response.data, fs.createWriteStream(posterPath));
+  return { path: posterPath, skipped: false };
+};
+
+const processPoster = async (videoInfo) => {
+  const { bc_id, web_root } = videoInfo;
+
+  if (!bc_id || bc_id === "" || !web_root || web_root === "") {
+    console.log(`Skipping poster with empty bc_id or web_root: bc_id=${bc_id}, web_root=${web_root}`);
+    return null;
+  }
+
+  console.log(`Processing poster: ${bc_id} for ${web_root}`);
+  
+  const outputDir = path.join(OUTPUT_BASE_PATH, web_root, OUTPUT_SUFFIX_PATH);
+  const metadataPath = path.join(outputDir, `${bc_id}.json`);
+  
+  if (!fs.existsSync(metadataPath)) {
+    console.log(`Metadata file not found for ${bc_id}, skipping poster download: ${metadataPath}`);
+    return null;
+  }
+  
+  // Read metadata file
+  const metadata = readMetadataFile(metadataPath);
+  
+  // Extract poster URL from metadata
+  const posterUrl = getPosterUrlFromMetadata(metadata);
+  
+  if (!posterUrl) {
+    console.log(`No poster URL found in metadata for ${bc_id}`);
+    return { bc_id, web_root, skipped: true, reason: 'No poster URL in metadata' };
+  }
+  
+  // Determine extension from URL
+  const extension = getExtensionFromUrl(posterUrl);
+  
+  // Download poster
+  const posterResult = await downloadPoster(posterUrl, bc_id, extension, outputDir);
+  if (posterResult.skipped) {
+    console.log(`Poster already exists for ${bc_id}, skipped download`);
+  } else {
+    console.log(`Poster downloaded for ${bc_id} (${extension})`);
+  }
+  
+  return {
+    bc_id,
+    web_root,
+    posterPath: posterResult.path,
+    extension,
+    skipped: posterResult.skipped
+  };
+};
+
+const processSinglePoster = async (videoInfo) => {
+  try {
+    const result = await processPoster(videoInfo);
+    
+    return { success: true, ...result };
+  } catch (error) {
+    console.error(`Failed to process poster for ${videoInfo.bc_id}:`, error.message);
+    return { success: false, bc_id: videoInfo.bc_id, error: error.message };
+  }
+};
+
+const processPosterWithTimeout = async (videoInfo) => {
+  return Promise.race([
+    processSinglePoster(videoInfo),
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error(`Timeout: Poster ${videoInfo.bc_id} exceeded ${MAX_POSTER_PROCESSING_TIME_MS / 1000 / 60} minutes`)), MAX_POSTER_PROCESSING_TIME_MS)
+    )
+  ]);
+};
+
+const processAllPosters = async (videoList) => {
+  const results = [];
+  let inProgress = 0;
+  let currentIndex = 0;
+  let completedCount = 0;
+  const totalPosters = videoList.length;
+  
+  return new Promise((resolve) => {
+    const processNext = async () => {
+      // Check if we're completely done
+      if (currentIndex >= totalPosters && inProgress === 0) {
+        console.log(`\nAll ${totalPosters} posters processed!`);
+        resolve(results);
+        return;
+      }
+      
+      // Fill empty slots up to MAX_CONCURRENT_POSTERS
+      while (inProgress < MAX_CONCURRENT_POSTERS && currentIndex < totalPosters) {
+        const videoInfo = videoList[currentIndex];
+        const posterIndex = currentIndex;
+        currentIndex++;
+        inProgress++;
+        
+        console.log(`[${new Date().toISOString()}] Starting poster ${posterIndex + 1}/${totalPosters}: ${videoInfo.bc_id} (${inProgress} in progress)`);
+        
+        // Start processing this poster with timeout (non-blocking)
+        processPosterWithTimeout(videoInfo)
+          .then(result => {
+            results.push(result);
+            inProgress--;
+            completedCount++;
+            
+            const successStr = result.success ? '✓' : '✗';
+            console.log(`[${new Date().toISOString()}] ${successStr} Completed ${completedCount}/${totalPosters}: ${videoInfo.bc_id} (${inProgress} still in progress)`);
+            
+            // Immediately try to start the next poster
+            processNext();
+          })
+          .catch(error => {
+            const errorType = error.message.includes('Timeout') ? '⏱ TIMEOUT' : '✗ ERROR';
+            console.error(`[${new Date().toISOString()}] ${errorType} processing poster ${posterIndex + 1}: ${videoInfo.bc_id} - ${error.message}`);
+            results.push({ success: false, bc_id: videoInfo.bc_id, error: error.message });
+            inProgress--;
+            completedCount++;
+            
+            // Continue processing even after error
+            processNext();
+          });
+      }
+    };
+    
+    // Kick off the initial batch
+    console.log(`Starting rolling queue with MAX_CONCURRENT_POSTERS=${MAX_CONCURRENT_POSTERS}`);
+    processNext();
+  });
+};
+
 const main = async () => {
   try {
     console.log('Starting Brightcove video migration...');
@@ -443,5 +631,102 @@ const main = async () => {
   }
 };
 
-main();
+const mainPosterDownload = async () => {
+  try {
+    console.log('Starting Brightcove poster download...');
+    console.log(`Skip existing files: ${SKIP_EXISTING_FILES ? 'ENABLED' : 'DISABLED'}`);
+    console.log(`Max concurrent posters: ${MAX_CONCURRENT_POSTERS}`);
+    console.log(`Processing timeout: ${MAX_POSTER_PROCESSING_TIME_MS / 1000 / 60} minutes per poster`);
+    console.log(`Output path: ${OUTPUT_BASE_PATH}/{webroot}/${OUTPUT_SUFFIX_PATH}`);
+    
+    const videoList = readCsvFile(CSV_FILE_PATH);
+    console.log(`Found ${videoList.length} videos to process for posters`);
+    
+    const results = await processAllPosters(videoList);
+    
+    const successCount = results.filter(r => r.success).length;
+    const failedCount = results.filter(r => !r.success).length;
+    const timeoutCount = results.filter(r => !r.success && r.error && r.error.includes('Timeout')).length;
+    const skippedCount = results.filter(r => r.success && (r.skipped || r.reason === 'No poster URL in metadata')).length;
+    const metadataNotFoundCount = results.filter(r => !r.success && r.error && r.error.includes('Metadata file not found')).length;
+    const noPosterUrlCount = results.filter(r => r.success && r.reason === 'No poster URL in metadata').length;
+    
+    console.log(`\n=== Poster Download Complete ===`);
+    console.log(`Total: ${results.length} videos`);
+    console.log(`Successful: ${successCount}`);
+    console.log(`Failed: ${failedCount}`);
+    console.log(`  - Timeouts (>${MAX_POSTER_PROCESSING_TIME_MS / 1000 / 60} min): ${timeoutCount}`);
+    console.log(`  - Metadata not found: ${metadataNotFoundCount}`);
+    console.log(`  - Other errors: ${failedCount - timeoutCount - metadataNotFoundCount}`);
+    console.log(`Skipped (already exist or no poster URL): ${skippedCount}`);
+    console.log(`  - No poster URL in metadata: ${noPosterUrlCount}`);
+    
+    return results;
+  } catch (error) {
+    console.error('Fatal error:', error.message);
+    process.exit(1);
+  }
+};
+
+// Command-line argument parsing
+const getCommandLineArgs = () => {
+  const args = process.argv.slice(2);
+  const options = {
+    step: 'all', // 'video', 'poster', or 'all'
+  };
+  
+  args.forEach(arg => {
+    if (arg === '--video' || arg === '-v') {
+      options.step = 'video';
+    } else if (arg === '--poster' || arg === '-p') {
+      options.step = 'poster';
+    } else if (arg === '--all' || arg === '-a') {
+      options.step = 'all';
+    } else if (arg === '--help' || arg === '-h') {
+      console.log(`
+Usage: node app.js [OPTIONS]
+
+Options:
+  --video, -v    Run video and metadata download only
+  --poster, -p   Run poster download only
+  --all, -a      Run both video and poster download (default)
+  --help, -h     Show this help message
+
+Examples:
+  node app.js --video   # Download videos and metadata only
+  node app.js --poster  # Download posters only
+  node app.js --all     # Download everything (default)
+      `);
+      process.exit(0);
+    }
+  });
+  
+  return options;
+};
+
+const run = async () => {
+  const options = getCommandLineArgs();
+  
+  try {
+    if (options.step === 'video' || options.step === 'all') {
+      await main();
+    }
+    
+    if (options.step === 'poster' || options.step === 'all') {
+      // Add a separator if running both
+      if (options.step === 'all') {
+        console.log('\n' + '='.repeat(50));
+        console.log('Starting poster download phase...');
+        console.log('='.repeat(50) + '\n');
+      }
+      await mainPosterDownload();
+    }
+  } catch (error) {
+    console.error('Fatal error:', error.message);
+    process.exit(1);
+  }
+};
+
+// Run based on command-line arguments
+run();
 
