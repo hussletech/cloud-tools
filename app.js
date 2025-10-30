@@ -831,6 +831,10 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
       }
     } catch (error) {
       console.error(`Failed to download metadata for ${bc_id}: ${error.message}`);
+      // If it's a 401, re-throw so the token refresh logic can catch it
+      if (isTokenExpiredError(error)) {
+        throw error;
+      }
     }
   }
   
@@ -879,6 +883,10 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
       }
     } catch (error) {
       console.error(`Failed to download video for ${bc_id}: ${error.message}`);
+      // If it's a 401, re-throw so the token refresh logic can catch it
+      if (isTokenExpiredError(error)) {
+        throw error;
+      }
     }
   }
   
@@ -895,6 +903,10 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
       metadata = await getVideoMetadata(bc_id, accessToken);
     } catch (error) {
       console.error(`Failed to fetch metadata for ${bc_id}: ${error.message}`);
+      // If it's a 401, re-throw so the token refresh logic can catch it
+      if (isTokenExpiredError(error)) {
+        throw error;
+      }
     }
   }
   
