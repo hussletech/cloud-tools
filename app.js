@@ -12,8 +12,8 @@ const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com';
 // const OUTPUT_BASE_PATH = './s3';
 
 const OUTPUT_SUFFIX_PATH = 'assets/video';
-const MAX_CONCURRENT_VIDEOS = 80;
-const MAX_CONCURRENT_POSTERS = 80;
+const MAX_CONCURRENT_VIDEOS = 120;
+const MAX_CONCURRENT_POSTERS = 120;
 const MAX_PROCESSING_TIME_MS = 10 * 60 * 1000; // 10 minutes timeout
 const MAX_POSTER_PROCESSING_TIME_MS = 5 * 60 * 1000; // 5 minutes timeout for posters
 const SKIP_EXISTING_FILES = true;
@@ -83,7 +83,8 @@ const readCsvFile = (filePath) => {
     video_id: record.video_id,
     site_id: record.site_id,
     web_root: record.webroot,
-    bc_id: record.bc_id
+    bc_id: record.bc_id,
+    fileName: record.fileName || '' // Include fileName if present (for verify step)
   }));
 };
 
@@ -716,6 +717,223 @@ const processAllPosters = async (videoList) => {
   });
 };
 
+// ==================== VERIFY AND DOWNLOAD MISSING FILES ====================
+
+const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
+  const { bc_id, web_root, fileName } = videoInfo;
+
+  if (!bc_id || bc_id === "" || !web_root || web_root === "") {
+    console.log(`Skipping verification with empty bc_id or web_root: bc_id=${bc_id}, web_root=${web_root}`);
+    return null;
+  }
+
+  console.log(`Verifying files for: ${bc_id} in ${web_root}`);
+  
+  const outputDir = path.join(OUTPUT_BASE_PATH, web_root, OUTPUT_SUFFIX_PATH);
+  ensureDirectoryExists(outputDir);
+  
+  const result = {
+    bc_id,
+    web_root,
+    videoMissing: false,
+    metadataMissing: false,
+    posterMissing: false,
+    thumbnailMissing: false,
+    videoDownloaded: false,
+    metadataDownloaded: false,
+    posterDownloaded: false,
+    thumbnailDownloaded: false
+  };
+  
+  // First check metadata file to determine container type
+  const metadataPath = path.join(outputDir, `${bc_id}.json`);
+  let container = 'mp4'; // Default container
+  let metadata = null;
+  
+  // Try to read existing metadata first
+  if (fs.existsSync(metadataPath)) {
+    try {
+      metadata = readMetadataFile(metadataPath);
+      container = metadata.container || 'mp4';
+    } catch (error) {
+      console.error(`Failed to read metadata for ${bc_id}: ${error.message}`);
+    }
+  } else {
+    // If metadata doesn't exist, we'll need to fetch it
+    result.metadataMissing = true;
+    console.log(`Metadata file missing for ${bc_id}, downloading...`);
+    try {
+      metadata = await getVideoMetadata(bc_id, accessToken);
+      const sources = await getVideoSources(bc_id, accessToken);
+      const videoSource = getLastVideoSource(sources);
+      
+      if (videoSource && videoSource.src) {
+        container = videoSource.container || 'mp4';
+        saveMetadataFile(bc_id, metadata, container, outputDir);
+        result.metadataDownloaded = true;
+        console.log(`Metadata saved for ${bc_id}`);
+      }
+    } catch (error) {
+      console.error(`Failed to download metadata for ${bc_id}: ${error.message}`);
+    }
+  }
+  
+  // Determine video file name - use fileName from CSV if available, otherwise construct it
+  const videoFileName = fileName && fileName.trim() !== '' ? fileName : `${bc_id}.${container}`;
+  const videoPath = path.join(outputDir, videoFileName);
+  
+  // Check video file
+  if (!fs.existsSync(videoPath)) {
+    result.videoMissing = true;
+    console.log(`Video file missing for ${bc_id}, downloading...`);
+    try {
+      // Fetch metadata and sources if we don't have them yet
+      if (!metadata) {
+        metadata = await getVideoMetadata(bc_id, accessToken);
+      }
+      const sources = await getVideoSources(bc_id, accessToken);
+      const videoSource = getLastVideoSource(sources);
+      
+      if (videoSource && videoSource.src) {
+        await downloadVideo(videoSource.src, bc_id, videoSource.container, outputDir);
+        result.videoDownloaded = true;
+        console.log(`Video downloaded for ${bc_id}`);
+      }
+    } catch (error) {
+      console.error(`Failed to download video for ${bc_id}: ${error.message}`);
+    }
+  }
+  
+  // Ensure we have metadata for poster and thumbnail URLs
+  if (!metadata && fs.existsSync(metadataPath)) {
+    try {
+      metadata = readMetadataFile(metadataPath);
+    } catch (error) {
+      console.error(`Failed to read metadata for ${bc_id}: ${error.message}`);
+    }
+  } else if (!metadata && !result.metadataMissing) {
+    // Try to fetch metadata if we still don't have it
+    try {
+      metadata = await getVideoMetadata(bc_id, accessToken);
+    } catch (error) {
+      console.error(`Failed to fetch metadata for ${bc_id}: ${error.message}`);
+    }
+  }
+  
+  // Check poster file
+  if (metadata) {
+    const posterUrl = getPosterUrlFromMetadata(metadata);
+    if (posterUrl) {
+      const posterExtension = getExtensionFromUrl(posterUrl);
+      const posterPath = path.join(outputDir, `${bc_id}_poster.${posterExtension}`);
+      
+      if (!fs.existsSync(posterPath)) {
+        result.posterMissing = true;
+        console.log(`Poster file missing for ${bc_id}, downloading...`);
+        try {
+          await downloadPoster(posterUrl, bc_id, posterExtension, outputDir);
+          result.posterDownloaded = true;
+          console.log(`Poster downloaded for ${bc_id}`);
+        } catch (error) {
+          console.error(`Failed to download poster for ${bc_id}: ${error.message}`);
+        }
+      }
+    }
+    
+    // Check thumbnail file
+    const thumbnailUrl = getThumbnailUrlFromMetadata(metadata);
+    if (thumbnailUrl) {
+      const thumbnailExtension = getExtensionFromUrl(thumbnailUrl);
+      const thumbnailPath = path.join(outputDir, `${bc_id}_thumbnail.${thumbnailExtension}`);
+      
+      if (!fs.existsSync(thumbnailPath)) {
+        result.thumbnailMissing = true;
+        console.log(`Thumbnail file missing for ${bc_id}, downloading...`);
+        try {
+          await downloadThumbnail(thumbnailUrl, bc_id, thumbnailExtension, outputDir);
+          result.thumbnailDownloaded = true;
+          console.log(`Thumbnail downloaded for ${bc_id}`);
+        } catch (error) {
+          console.error(`Failed to download thumbnail for ${bc_id}: ${error.message}`);
+        }
+      }
+    }
+  }
+  
+  return result;
+};
+
+const processSingleVerification = async (videoInfo, tokenManager) => {
+  try {
+    const result = await verifyAndDownloadMissing(videoInfo, tokenManager.getToken());
+    return { success: true, ...result };
+  } catch (error) {
+    console.error(`Failed to verify ${videoInfo.bc_id}:`, error.message);
+    return { success: false, bc_id: videoInfo.bc_id, error: error.message };
+  }
+};
+
+const processVerificationWithTimeout = async (videoInfo, tokenManager) => {
+  return Promise.race([
+    processSingleVerification(videoInfo, tokenManager),
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error(`Timeout: Verification ${videoInfo.bc_id} exceeded ${MAX_PROCESSING_TIME_MS / 1000 / 60} minutes`)), MAX_PROCESSING_TIME_MS)
+    )
+  ]);
+};
+
+const processAllVerifications = async (videoList, initialAccessToken) => {
+  const tokenManager = createTokenManager(initialAccessToken);
+  const results = [];
+  let inProgress = 0;
+  let currentIndex = 0;
+  let completedCount = 0;
+  const totalVideos = videoList.length;
+  
+  return new Promise((resolve) => {
+    const processNext = async () => {
+      if (currentIndex >= totalVideos && inProgress === 0) {
+        console.log(`\nAll ${totalVideos} videos verified!`);
+        resolve(results);
+        return;
+      }
+      
+      while (inProgress < MAX_CONCURRENT_VIDEOS && currentIndex < totalVideos) {
+        const videoInfo = videoList[currentIndex];
+        const videoIndex = currentIndex;
+        currentIndex++;
+        inProgress++;
+        
+        console.log(`[${new Date().toISOString()}] Starting verification ${videoIndex + 1}/${totalVideos}: ${videoInfo.bc_id} (${inProgress} in progress)`);
+        
+        processVerificationWithTimeout(videoInfo, tokenManager)
+          .then(result => {
+            results.push(result);
+            inProgress--;
+            completedCount++;
+            
+            const successStr = result.success ? '✓' : '✗';
+            console.log(`[${new Date().toISOString()}] ${successStr} Completed ${completedCount}/${totalVideos}: ${videoInfo.bc_id} (${inProgress} still in progress)`);
+            
+            processNext();
+          })
+          .catch(error => {
+            const errorType = error.message.includes('Timeout') ? '⏱ TIMEOUT' : '✗ ERROR';
+            console.error(`[${new Date().toISOString()}] ${errorType} verifying ${videoIndex + 1}: ${videoInfo.bc_id} - ${error.message}`);
+            results.push({ success: false, bc_id: videoInfo.bc_id, error: error.message });
+            inProgress--;
+            completedCount++;
+            
+            processNext();
+          });
+      }
+    };
+    
+    console.log(`Starting rolling queue with MAX_CONCURRENT_VIDEOS=${MAX_CONCURRENT_VIDEOS}`);
+    processNext();
+  });
+};
+
 // ==================== THUMBNAIL ONLY DOWNLOAD FUNCTIONS ====================
 
 const processThumbnail = async (videoInfo) => {
@@ -985,11 +1203,63 @@ const mainThumbnailDownload = async () => {
   }
 };
 
+const mainVerifyFiles = async () => {
+  try {
+    console.log('Starting file verification and download missing files...');
+    console.log(`Reading from: ${OUTPUT_CSV_PATH}`);
+    console.log(`Max concurrent verifications: ${MAX_CONCURRENT_VIDEOS}`);
+    console.log(`Processing timeout: ${MAX_PROCESSING_TIME_MS / 1000 / 60} minutes per video`);
+    console.log(`Output path: ${OUTPUT_BASE_PATH}/{webroot}/${OUTPUT_SUFFIX_PATH}`);
+    
+    const videoList = readCsvFile(OUTPUT_CSV_PATH);
+    console.log(`Found ${videoList.length} videos to verify`);
+    
+    const accessToken = await getAccessToken();
+    console.log('Access token obtained');
+    
+    const results = await processAllVerifications(videoList, accessToken);
+    
+    const successCount = results.filter(r => r.success).length;
+    const failedCount = results.filter(r => !r.success).length;
+    const timeoutCount = results.filter(r => !r.success && r.error && r.error.includes('Timeout')).length;
+    const videoMissingCount = results.filter(r => r.success && r.videoMissing).length;
+    const metadataMissingCount = results.filter(r => r.success && r.metadataMissing).length;
+    const posterMissingCount = results.filter(r => r.success && r.posterMissing).length;
+    const thumbnailMissingCount = results.filter(r => r.success && r.thumbnailMissing).length;
+    const videoDownloadedCount = results.filter(r => r.success && r.videoDownloaded).length;
+    const metadataDownloadedCount = results.filter(r => r.success && r.metadataDownloaded).length;
+    const posterDownloadedCount = results.filter(r => r.success && r.posterDownloaded).length;
+    const thumbnailDownloadedCount = results.filter(r => r.success && r.thumbnailDownloaded).length;
+    
+    console.log(`\n=== Verification Complete ===`);
+    console.log(`Total: ${results.length} videos`);
+    console.log(`Successful: ${successCount}`);
+    console.log(`Failed: ${failedCount}`);
+    console.log(`  - Timeouts (>${MAX_PROCESSING_TIME_MS / 1000 / 60} min): ${timeoutCount}`);
+    console.log(`  - Other errors: ${failedCount - timeoutCount}`);
+    console.log(`\nMissing Files Detected:`);
+    console.log(`  - Videos missing: ${videoMissingCount}`);
+    console.log(`  - Metadata missing: ${metadataMissingCount}`);
+    console.log(`  - Posters missing: ${posterMissingCount}`);
+    console.log(`  - Thumbnails missing: ${thumbnailMissingCount}`);
+    console.log(`\nFiles Downloaded:`);
+    console.log(`  - Videos downloaded: ${videoDownloadedCount}`);
+    console.log(`  - Metadata downloaded: ${metadataDownloadedCount}`);
+    console.log(`  - Posters downloaded: ${posterDownloadedCount}`);
+    console.log(`  - Thumbnails downloaded: ${thumbnailDownloadedCount}`);
+    
+    return results;
+  } catch (error) {
+    console.error('Fatal error:', error.message);
+    process.exit(1);
+  }
+};
+
 // Command-line argument parsing
 const getCommandLineArgs = () => {
   const args = process.argv.slice(2);
   const options = {
-    step: 'all', // 'video', 'poster', 'thumbnail', or 'all'
+    step: 'all', // 'video', 'poster', 'thumbnail', 'verify', or 'all'
   };
   
   args.forEach(arg => {
@@ -999,6 +1269,8 @@ const getCommandLineArgs = () => {
       options.step = 'poster';
     } else if (arg === '--thumbnail' || arg === '-t') {
       options.step = 'thumbnail';
+    } else if (arg === '--verify' || arg === '--check' || arg === '-c') {
+      options.step = 'verify';
     } else if (arg === '--all' || arg === '-a') {
       options.step = 'all';
     } else if (arg === '--help' || arg === '-h') {
@@ -1009,6 +1281,7 @@ Options:
   --video, -v       Run video and metadata download only
   --poster, -p      Run poster and thumbnail download only
   --thumbnail, -t   Run thumbnail download only
+  --verify, -c      Verify and download missing files from output CSV
   --all, -a         Run both video and image download (default)
   --help, -h        Show this help message
 
@@ -1016,6 +1289,7 @@ Examples:
   node app.js --video      # Download videos and metadata only
   node app.js --poster     # Download posters and thumbnails only
   node app.js --thumbnail  # Download thumbnails only
+  node app.js --verify     # Verify files from output CSV and download missing
   node app.js --all        # Download everything (videos, metadata, posters, thumbnails)
       `);
       process.exit(0);
@@ -1045,6 +1319,10 @@ const run = async () => {
     
     if (options.step === 'thumbnail') {
       await mainThumbnailDownload();
+    }
+    
+    if (options.step === 'verify') {
+      await mainVerifyFiles();
     }
   } catch (error) {
     console.error('Fatal error:', error.message);
