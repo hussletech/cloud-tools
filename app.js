@@ -6,9 +6,9 @@ const { parse } = require('csv-parse/sync');
 const { pipeline } = require('stream/promises');
 
 // const CSV_FILE_PATH = './bc-video-all.csv';
-const CSV_FILE_PATH = './latest-30OCT.csv';
+const CSV_FILE_PATH = './latest-31OCT.csv';
 
-const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com';
+const OUTPUT_BASE_PATH = './home/ec2-user/assets.soundconcepts.com';
 // const OUTPUT_BASE_PATH = './s3';
 
 const OUTPUT_SUFFIX_PATH = 'assets/video';
@@ -18,6 +18,7 @@ const MAX_PROCESSING_TIME_MS = 10 * 60 * 1000; // 10 minutes timeout
 const MAX_POSTER_PROCESSING_TIME_MS = 5 * 60 * 1000; // 5 minutes timeout for posters
 const SKIP_EXISTING_FILES = true;
 const OUTPUT_CSV_PATH = './output-bc-migration.csv';
+const VERIFY_OUTPUT_CSV_PATH = './verified-bc-migration.csv';
 const BRIGHTCOVE_OAUTH_URL = 'https://oauth.brightcove.com/v4/access_token';
 const BRIGHTCOVE_CMS_URL = 'https://cms.api.brightcove.com/v1';
 const BRIGHTCOVE_ACCOUNT_ID = '659677170001';
@@ -300,6 +301,7 @@ const isTokenExpiredError = (error) => {
 };
 
 const csvWriteLock = { locked: false, queue: [] };
+const verifyCsvWriteLock = { locked: false, queue: [] };
 
 const writeToCsv = async (record) => {
   // Simple lock mechanism to prevent race conditions
@@ -325,6 +327,30 @@ const writeToCsv = async (record) => {
   }
 };
 
+const writeToVerifyCsv = async (record) => {
+  // Simple lock mechanism to prevent race conditions
+  while (verifyCsvWriteLock.locked) {
+    await new Promise(resolve => verifyCsvWriteLock.queue.push(resolve));
+  }
+  
+  verifyCsvWriteLock.locked = true;
+  
+  try {
+    const { db_name, video_id, site_id, web_root, bc_id, videoFileName, posterFileName } = record;
+    // Format: db_name,video_id,site_id,webroot,"bc_id","videoFileName","posterFileName"
+    const csvLine = `${db_name},${video_id},${site_id},${web_root},"${bc_id}","${videoFileName}","${posterFileName}"\n`;
+    
+    // Use appendFileSync for atomic write operation
+    fs.appendFileSync(VERIFY_OUTPUT_CSV_PATH, csvLine, 'utf-8');
+  } finally {
+    verifyCsvWriteLock.locked = false;
+    if (verifyCsvWriteLock.queue.length > 0) {
+      const resolve = verifyCsvWriteLock.queue.shift();
+      resolve();
+    }
+  }
+};
+
 const initializeOutputCsv = () => {
   // Write header if file doesn't exist
   if (!fs.existsSync(OUTPUT_CSV_PATH)) {
@@ -333,6 +359,17 @@ const initializeOutputCsv = () => {
     console.log(`Created output CSV file: ${OUTPUT_CSV_PATH}`);
   } else {
     console.log(`Output CSV file already exists: ${OUTPUT_CSV_PATH}`);
+  }
+};
+
+const initializeVerifyOutputCsv = () => {
+  // Write header if file doesn't exist
+  if (!fs.existsSync(VERIFY_OUTPUT_CSV_PATH)) {
+    const header = 'db_name,"video_id","site_id","webroot","bc_id","videoFileName","posterFileName"\n';
+    fs.writeFileSync(VERIFY_OUTPUT_CSV_PATH, header, 'utf-8');
+    console.log(`Created verify output CSV file: ${VERIFY_OUTPUT_CSV_PATH}`);
+  } else {
+    console.log(`Verify output CSV file already exists: ${VERIFY_OUTPUT_CSV_PATH}`);
   }
 };
 
@@ -720,7 +757,7 @@ const processAllPosters = async (videoList) => {
 // ==================== VERIFY AND DOWNLOAD MISSING FILES ====================
 
 const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
-  const { bc_id, web_root, fileName } = videoInfo;
+  const { bc_id, web_root, fileName, db_name, video_id, site_id } = videoInfo;
 
   if (!bc_id || bc_id === "" || !web_root || web_root === "") {
     console.log(`Skipping verification with empty bc_id or web_root: bc_id=${bc_id}, web_root=${web_root}`);
@@ -733,6 +770,9 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
   ensureDirectoryExists(outputDir);
   
   const result = {
+    db_name,
+    video_id,
+    site_id,
     bc_id,
     web_root,
     videoMissing: false,
@@ -742,7 +782,9 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
     videoDownloaded: false,
     metadataDownloaded: false,
     posterDownloaded: false,
-    thumbnailDownloaded: false
+    thumbnailDownloaded: false,
+    videoFileName: '',
+    posterFileName: ''
   };
   
   // First check metadata file to determine container type
@@ -782,6 +824,9 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
   const videoFileName = fileName && fileName.trim() !== '' ? fileName : `${bc_id}.${container}`;
   const videoPath = path.join(outputDir, videoFileName);
   
+  // Set the video filename in result
+  result.videoFileName = videoFileName;
+  
   // Check video file
   if (!fs.existsSync(videoPath)) {
     result.videoMissing = true;
@@ -797,6 +842,8 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
       if (videoSource && videoSource.src) {
         await downloadVideo(videoSource.src, bc_id, videoSource.container, outputDir);
         result.videoDownloaded = true;
+        // Update filename with actual container from API
+        result.videoFileName = `${bc_id}.${videoSource.container}`;
         console.log(`Video downloaded for ${bc_id}`);
       }
     } catch (error) {
@@ -825,7 +872,11 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
     const posterUrl = getPosterUrlFromMetadata(metadata);
     if (posterUrl) {
       const posterExtension = getExtensionFromUrl(posterUrl);
-      const posterPath = path.join(outputDir, `${bc_id}_poster.${posterExtension}`);
+      const posterFileName = `${bc_id}_poster.${posterExtension}`;
+      const posterPath = path.join(outputDir, posterFileName);
+      
+      // Set the poster filename in result
+      result.posterFileName = posterFileName;
       
       if (!fs.existsSync(posterPath)) {
         result.posterMissing = true;
@@ -866,6 +917,20 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
 const processSingleVerification = async (videoInfo, tokenManager) => {
   try {
     const result = await verifyAndDownloadMissing(videoInfo, tokenManager.getToken());
+    
+    // Write to verify output CSV if processing was successful and not null
+    if (result && result.bc_id) {
+      await writeToVerifyCsv({
+        db_name: result.db_name,
+        video_id: result.video_id,
+        site_id: result.site_id,
+        web_root: result.web_root,
+        bc_id: result.bc_id,
+        videoFileName: result.videoFileName || '',
+        posterFileName: result.posterFileName || ''
+      });
+    }
+    
     return { success: true, ...result };
   } catch (error) {
     console.error(`Failed to verify ${videoInfo.bc_id}:`, error.message);
@@ -1206,12 +1271,16 @@ const mainThumbnailDownload = async () => {
 const mainVerifyFiles = async () => {
   try {
     console.log('Starting file verification and download missing files...');
-    console.log(`Reading from: ${OUTPUT_CSV_PATH}`);
+    console.log(`Reading from: ${CSV_FILE_PATH}`);
+    console.log(`Writing to: ${VERIFY_OUTPUT_CSV_PATH}`);
     console.log(`Max concurrent verifications: ${MAX_CONCURRENT_VIDEOS}`);
     console.log(`Processing timeout: ${MAX_PROCESSING_TIME_MS / 1000 / 60} minutes per video`);
     console.log(`Output path: ${OUTPUT_BASE_PATH}/{webroot}/${OUTPUT_SUFFIX_PATH}`);
     
-    const videoList = readCsvFile(OUTPUT_CSV_PATH);
+    // Initialize verify output CSV file
+    initializeVerifyOutputCsv();
+    
+    const videoList = readCsvFile(CSV_FILE_PATH);
     console.log(`Found ${videoList.length} videos to verify`);
     
     const accessToken = await getAccessToken();
@@ -1281,7 +1350,7 @@ Options:
   --video, -v       Run video and metadata download only
   --poster, -p      Run poster and thumbnail download only
   --thumbnail, -t   Run thumbnail download only
-  --verify, -c      Verify and download missing files from output CSV
+  --verify, -c      Verify and download missing files, outputs CSV with filenames
   --all, -a         Run both video and image download (default)
   --help, -h        Show this help message
 
@@ -1289,7 +1358,7 @@ Examples:
   node app.js --video      # Download videos and metadata only
   node app.js --poster     # Download posters and thumbnails only
   node app.js --thumbnail  # Download thumbnails only
-  node app.js --verify     # Verify files from output CSV and download missing
+  node app.js --verify     # Verify files and create CSV with video/poster filenames
   node app.js --all        # Download everything (videos, metadata, posters, thumbnails)
       `);
       process.exit(0);
