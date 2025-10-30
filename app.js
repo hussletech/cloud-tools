@@ -891,6 +891,7 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
       // Set the poster filename in result
       result.posterFileName = posterFileName;
       
+      console.log(`Checking poster file: ${posterPath}`);
       if (!fs.existsSync(posterPath)) {
         result.posterMissing = true;
         console.log(`Poster file missing for ${bc_id}, downloading...`);
@@ -901,7 +902,11 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
         } catch (error) {
           console.error(`Failed to download poster for ${bc_id}: ${error.message}`);
         }
+      } else {
+        console.log(`Poster file exists for ${bc_id}: ${posterFileName}`);
       }
+    } else {
+      console.log(`No poster URL found in metadata for ${bc_id}`);
     }
     
     // Check thumbnail file
@@ -910,6 +915,7 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
       const thumbnailExtension = getExtensionFromUrl(thumbnailUrl);
       const thumbnailPath = path.join(outputDir, `${bc_id}_thumbnail.${thumbnailExtension}`);
       
+      console.log(`Checking thumbnail file: ${thumbnailPath}`);
       if (!fs.existsSync(thumbnailPath)) {
         result.thumbnailMissing = true;
         console.log(`Thumbnail file missing for ${bc_id}, downloading...`);
@@ -920,7 +926,11 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
         } catch (error) {
           console.error(`Failed to download thumbnail for ${bc_id}: ${error.message}`);
         }
+      } else {
+        console.log(`Thumbnail file exists for ${bc_id}: ${bc_id}_thumbnail.${thumbnailExtension}`);
       }
+    } else {
+      console.log(`No thumbnail URL found in metadata for ${bc_id}`);
     }
   }
   
