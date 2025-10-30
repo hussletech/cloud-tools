@@ -8,7 +8,7 @@ const { pipeline } = require('stream/promises');
 // const CSV_FILE_PATH = './bc-video-all.csv';
 const CSV_FILE_PATH = './latest-31OCT.csv';
 
-const OUTPUT_BASE_PATH = './home/ec2-user/assets.soundconcepts.com';
+const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com';
 // const OUTPUT_BASE_PATH = './s3';
 
 const OUTPUT_SUFFIX_PATH = 'assets/video';
