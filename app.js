@@ -363,14 +363,10 @@ const initializeOutputCsv = () => {
 };
 
 const initializeVerifyOutputCsv = () => {
-  // Write header if file doesn't exist
-  if (!fs.existsSync(VERIFY_OUTPUT_CSV_PATH)) {
-    const header = 'db_name,"video_id","site_id","webroot","bc_id","videoFileName","posterFileName"\n';
-    fs.writeFileSync(VERIFY_OUTPUT_CSV_PATH, header, 'utf-8');
-    console.log(`Created verify output CSV file: ${VERIFY_OUTPUT_CSV_PATH}`);
-  } else {
-    console.log(`Verify output CSV file already exists: ${VERIFY_OUTPUT_CSV_PATH}`);
-  }
+  // Always recreate the file to start fresh
+  const header = 'db_name,"video_id","site_id","webroot","bc_id","videoFileName","posterFileName"\n';
+  fs.writeFileSync(VERIFY_OUTPUT_CSV_PATH, header, 'utf-8');
+  console.log(`Created fresh verify output CSV file: ${VERIFY_OUTPUT_CSV_PATH}`);
 };
 
 const processVideoWithRetry = async (videoInfo, accessToken, getNewToken) => {
@@ -827,8 +823,23 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
   // Set the video filename in result
   result.videoFileName = videoFileName;
   
+  // Check if video file exists (check common video extensions if not found)
+  let videoExists = fs.existsSync(videoPath);
+  if (!videoExists && (!fileName || fileName.trim() === '')) {
+    // If no fileName from CSV and file not found with metadata container, check other common extensions
+    const commonExtensions = ['mp4', 'mov', 'avi', 'mkv', 'flv', 'webm'];
+    for (const ext of commonExtensions) {
+      const altPath = path.join(outputDir, `${bc_id}.${ext}`);
+      if (fs.existsSync(altPath)) {
+        videoExists = true;
+        result.videoFileName = `${bc_id}.${ext}`;
+        break;
+      }
+    }
+  }
+  
   // Check video file
-  if (!fs.existsSync(videoPath)) {
+  if (!videoExists) {
     result.videoMissing = true;
     console.log(`Video file missing for ${bc_id}, downloading...`);
     try {
@@ -840,11 +851,13 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
       const videoSource = getLastVideoSource(sources);
       
       if (videoSource && videoSource.src) {
-        await downloadVideo(videoSource.src, bc_id, videoSource.container, outputDir);
-        result.videoDownloaded = true;
+        const videoDownloadResult = await downloadVideo(videoSource.src, bc_id, videoSource.container, outputDir);
+        result.videoDownloaded = !videoDownloadResult.skipped;
         // Update filename with actual container from API
         result.videoFileName = `${bc_id}.${videoSource.container}`;
-        console.log(`Video downloaded for ${bc_id}`);
+        if (!videoDownloadResult.skipped) {
+          console.log(`Video downloaded for ${bc_id}`);
+        }
       }
     } catch (error) {
       console.error(`Failed to download video for ${bc_id}: ${error.message}`);
