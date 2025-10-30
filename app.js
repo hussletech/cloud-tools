@@ -12,8 +12,8 @@ const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com';
 // const OUTPUT_BASE_PATH = './s3';
 
 const OUTPUT_SUFFIX_PATH = 'assets/video';
-const MAX_CONCURRENT_VIDEOS = 120;
-const MAX_CONCURRENT_POSTERS = 120;
+const MAX_CONCURRENT_VIDEOS = 20;
+const MAX_CONCURRENT_POSTERS = 20;
 const MAX_PROCESSING_TIME_MS = 10 * 60 * 1000; // 10 minutes timeout
 const MAX_POSTER_PROCESSING_TIME_MS = 5 * 60 * 1000; // 5 minutes timeout for posters
 const SKIP_EXISTING_FILES = true;
