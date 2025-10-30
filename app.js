@@ -104,27 +104,45 @@ const getAccessToken = async () => {
 };
 
 const getVideoMetadata = async (bcId, accessToken) => {
-  const response = await axios.get(
-    `${BRIGHTCOVE_CMS_URL}/accounts/${BRIGHTCOVE_ACCOUNT_ID}/videos/${bcId}`,
-    {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`
+  try {
+    const response = await axios.get(
+      `${BRIGHTCOVE_CMS_URL}/accounts/${BRIGHTCOVE_ACCOUNT_ID}/videos/${bcId}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`
+        }
       }
+    );
+    return response.data;
+  } catch (error) {
+    if (error.response && error.response.status === 401) {
+      console.error(`401 Unauthorized getting metadata for ${bcId}`);
+    } else if (error.response && error.response.status === 404) {
+      console.error(`404 Video not found: ${bcId}`);
     }
-  );
-  return response.data;
+    throw error;
+  }
 };
 
 const getVideoSources = async (bcId, accessToken) => {
-  const response = await axios.get(
-    `${BRIGHTCOVE_CMS_URL}/accounts/${BRIGHTCOVE_ACCOUNT_ID}/videos/${bcId}/sources`,
-    {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`
+  try {
+    const response = await axios.get(
+      `${BRIGHTCOVE_CMS_URL}/accounts/${BRIGHTCOVE_ACCOUNT_ID}/videos/${bcId}/sources`,
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`
+        }
       }
+    );
+    return response.data;
+  } catch (error) {
+    if (error.response && error.response.status === 401) {
+      console.error(`401 Unauthorized getting video sources for ${bcId}`);
+    } else if (error.response && error.response.status === 404) {
+      console.error(`404 Video sources not found: ${bcId}`);
     }
-  );
-  return response.data;
+    throw error;
+  }
 };
 
 const saveMetadataFile = (bcId, metadata, container, outputDir) => {
@@ -939,7 +957,20 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
 
 const processSingleVerification = async (videoInfo, tokenManager) => {
   try {
-    const result = await verifyAndDownloadMissing(videoInfo, tokenManager.getToken());
+    let result;
+    try {
+      result = await verifyAndDownloadMissing(videoInfo, tokenManager.getToken());
+    } catch (error) {
+      // Retry with fresh token if we get 401
+      if (isTokenExpiredError(error)) {
+        console.log(`Token expired during verification of ${videoInfo.bc_id}, refreshing...`);
+        await tokenManager.refreshToken();
+        console.log(`Token refreshed, retrying ${videoInfo.bc_id}`);
+        result = await verifyAndDownloadMissing(videoInfo, tokenManager.getToken());
+      } else {
+        throw error;
+      }
+    }
     
     // Write to verify output CSV if processing was successful and not null
     if (result && result.bc_id) {
@@ -1174,6 +1205,9 @@ const main = async () => {
     const successCount = results.filter(r => r.success).length;
     const failedCount = results.filter(r => !r.success).length;
     const timeoutCount = results.filter(r => !r.success && r.error && r.error.includes('Timeout')).length;
+    const error401Count = results.filter(r => !r.success && r.error && (r.error.includes('401') || r.error.includes('Unauthorized'))).length;
+    const error404Count = results.filter(r => !r.success && r.error && (r.error.includes('404') || r.error.includes('not found'))).length;
+    const tlsErrorCount = results.filter(r => !r.success && r.error && r.error.includes('TLS')).length;
     const videoSkippedCount = results.filter(r => r.success && r.videoSkipped).length;
     const metadataSkippedCount = results.filter(r => r.success && r.metadataSkipped).length;
     const posterDownloadedCount = results.filter(r => r.success && r.posterDownloaded).length;
@@ -1186,7 +1220,10 @@ const main = async () => {
     console.log(`Successful: ${successCount}`);
     console.log(`Failed: ${failedCount}`);
     console.log(`  - Timeouts (>${MAX_PROCESSING_TIME_MS / 1000 / 60} min): ${timeoutCount}`);
-    console.log(`  - Other errors: ${failedCount - timeoutCount}`);
+    console.log(`  - 401 Unauthorized errors: ${error401Count}`);
+    console.log(`  - 404 Not Found errors: ${error404Count}`);
+    console.log(`  - TLS connection errors: ${tlsErrorCount}`);
+    console.log(`  - Other errors: ${failedCount - timeoutCount - error401Count - error404Count - tlsErrorCount}`);
     console.log(`Videos skipped (already exist): ${videoSkippedCount}`);
     console.log(`Metadata skipped (already exist): ${metadataSkippedCount}`);
     console.log(`\nPoster Statistics:`);
@@ -1195,6 +1232,14 @@ const main = async () => {
     console.log(`\nThumbnail Statistics:`);
     console.log(`  - Downloaded: ${thumbnailDownloadedCount}`);
     console.log(`  - Skipped (already exist): ${thumbnailSkippedCount}`);
+    
+    // Print list of videos with 401 errors if any
+    if (error401Count > 0) {
+      console.log(`\n⚠️  Videos with 401 Unauthorized errors:`);
+      results
+        .filter(r => !r.success && r.error && (r.error.includes('401') || r.error.includes('Unauthorized')))
+        .forEach(r => console.log(`  - ${r.bc_id}`));
+    }
     
     return results;
   } catch (error) {
@@ -1314,6 +1359,9 @@ const mainVerifyFiles = async () => {
     const successCount = results.filter(r => r.success).length;
     const failedCount = results.filter(r => !r.success).length;
     const timeoutCount = results.filter(r => !r.success && r.error && r.error.includes('Timeout')).length;
+    const error401Count = results.filter(r => !r.success && r.error && (r.error.includes('401') || r.error.includes('Unauthorized'))).length;
+    const error404Count = results.filter(r => !r.success && r.error && (r.error.includes('404') || r.error.includes('not found'))).length;
+    const tlsErrorCount = results.filter(r => !r.success && r.error && r.error.includes('TLS')).length;
     const videoMissingCount = results.filter(r => r.success && r.videoMissing).length;
     const metadataMissingCount = results.filter(r => r.success && r.metadataMissing).length;
     const posterMissingCount = results.filter(r => r.success && r.posterMissing).length;
@@ -1328,7 +1376,10 @@ const mainVerifyFiles = async () => {
     console.log(`Successful: ${successCount}`);
     console.log(`Failed: ${failedCount}`);
     console.log(`  - Timeouts (>${MAX_PROCESSING_TIME_MS / 1000 / 60} min): ${timeoutCount}`);
-    console.log(`  - Other errors: ${failedCount - timeoutCount}`);
+    console.log(`  - 401 Unauthorized errors: ${error401Count}`);
+    console.log(`  - 404 Not Found errors: ${error404Count}`);
+    console.log(`  - TLS connection errors: ${tlsErrorCount}`);
+    console.log(`  - Other errors: ${failedCount - timeoutCount - error401Count - error404Count - tlsErrorCount}`);
     console.log(`\nMissing Files Detected:`);
     console.log(`  - Videos missing: ${videoMissingCount}`);
     console.log(`  - Metadata missing: ${metadataMissingCount}`);
@@ -1339,6 +1390,14 @@ const mainVerifyFiles = async () => {
     console.log(`  - Metadata downloaded: ${metadataDownloadedCount}`);
     console.log(`  - Posters downloaded: ${posterDownloadedCount}`);
     console.log(`  - Thumbnails downloaded: ${thumbnailDownloadedCount}`);
+    
+    // Print list of videos with 401 errors if any
+    if (error401Count > 0) {
+      console.log(`\n⚠️  Videos with 401 Unauthorized errors:`);
+      results
+        .filter(r => !r.success && r.error && (r.error.includes('401') || r.error.includes('Unauthorized')))
+        .forEach(r => console.log(`  - ${r.bc_id}`));
+    }
     
     return results;
   } catch (error) {
