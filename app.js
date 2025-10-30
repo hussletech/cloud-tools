@@ -6,14 +6,14 @@ const { parse } = require('csv-parse/sync');
 const { pipeline } = require('stream/promises');
 
 // const CSV_FILE_PATH = './bc-video-all.csv';
-const CSV_FILE_PATH = './bc-video-all-new.csv';
+const CSV_FILE_PATH = './latest-30OCT.csv';
 
 const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com';
 // const OUTPUT_BASE_PATH = './s3';
 
 const OUTPUT_SUFFIX_PATH = 'assets/video';
-const MAX_CONCURRENT_VIDEOS = 120;
-const MAX_CONCURRENT_POSTERS = 120;
+const MAX_CONCURRENT_VIDEOS = 80;
+const MAX_CONCURRENT_POSTERS = 80;
 const MAX_PROCESSING_TIME_MS = 10 * 60 * 1000; // 10 minutes timeout
 const MAX_POSTER_PROCESSING_TIME_MS = 5 * 60 * 1000; // 5 minutes timeout for posters
 const SKIP_EXISTING_FILES = true;
@@ -226,6 +226,54 @@ const processVideo = async (videoInfo, accessToken) => {
     console.log(`Metadata saved for ${bc_id}`);
   }
   
+  // Download poster and thumbnail images independently
+  let posterDownloaded = false;
+  let posterSkipped = false;
+  let thumbnailDownloaded = false;
+  let thumbnailSkipped = false;
+  
+  // Try to download poster - catch errors so thumbnail download can still proceed
+  const posterUrl = getPosterUrlFromMetadata(metadata);
+  if (posterUrl) {
+    try {
+      const posterExtension = getExtensionFromUrl(posterUrl);
+      const posterResult = await downloadPoster(posterUrl, bc_id, posterExtension, outputDir);
+      posterSkipped = posterResult.skipped;
+      posterDownloaded = !posterResult.skipped;
+      if (posterResult.skipped) {
+        console.log(`Poster already exists for ${bc_id}, skipped download`);
+      } else {
+        console.log(`Poster downloaded for ${bc_id} (${posterExtension})`);
+      }
+    } catch (error) {
+      console.error(`Failed to download poster for ${bc_id}: ${error.message}`);
+      // Continue to thumbnail download
+    }
+  } else {
+    console.log(`No poster URL found in metadata for ${bc_id}`);
+  }
+  
+  // Try to download thumbnail - catch errors so it doesn't affect poster
+  const thumbnailUrl = getThumbnailUrlFromMetadata(metadata);
+  if (thumbnailUrl) {
+    try {
+      const thumbnailExtension = getExtensionFromUrl(thumbnailUrl);
+      const thumbnailResult = await downloadThumbnail(thumbnailUrl, bc_id, thumbnailExtension, outputDir);
+      thumbnailSkipped = thumbnailResult.skipped;
+      thumbnailDownloaded = !thumbnailResult.skipped;
+      if (thumbnailResult.skipped) {
+        console.log(`Thumbnail already exists for ${bc_id}, skipped download`);
+      } else {
+        console.log(`Thumbnail downloaded for ${bc_id} (${thumbnailExtension})`);
+      }
+    } catch (error) {
+      console.error(`Failed to download thumbnail for ${bc_id}: ${error.message}`);
+      // Continue processing
+    }
+  } else {
+    console.log(`No thumbnail URL found in metadata for ${bc_id}`);
+  }
+  
   const fileName = `${bc_id}.${videoSource.container}`;
   
   return { 
@@ -238,7 +286,11 @@ const processVideo = async (videoInfo, accessToken) => {
     outputDir, 
     container: videoSource.container,
     videoSkipped: videoResult.skipped,
-    metadataSkipped: metadataResult.skipped
+    metadataSkipped: metadataResult.skipped,
+    posterDownloaded,
+    posterSkipped,
+    thumbnailDownloaded,
+    thumbnailSkipped
   };
 };
 
@@ -532,38 +584,48 @@ const processPoster = async (videoInfo) => {
     skipped: true
   };
   
-  // Extract and download poster
+  // Extract and download poster - catch errors so thumbnail download can still proceed
   const posterUrl = getPosterUrlFromMetadata(metadata);
   if (posterUrl) {
-    const posterExtension = getExtensionFromUrl(posterUrl);
-    const posterResult = await downloadPoster(posterUrl, bc_id, posterExtension, outputDir);
-    result.posterPath = posterResult.path;
-    result.posterSkipped = posterResult.skipped;
-    result.posterDownloaded = !posterResult.skipped;
-    if (posterResult.skipped) {
-      console.log(`Poster already exists for ${bc_id}, skipped download`);
-    } else {
-      console.log(`Poster downloaded for ${bc_id} (${posterExtension})`);
+    try {
+      const posterExtension = getExtensionFromUrl(posterUrl);
+      const posterResult = await downloadPoster(posterUrl, bc_id, posterExtension, outputDir);
+      result.posterPath = posterResult.path;
+      result.posterSkipped = posterResult.skipped;
+      result.posterDownloaded = !posterResult.skipped;
+      if (posterResult.skipped) {
+        console.log(`Poster already exists for ${bc_id}, skipped download`);
+      } else {
+        console.log(`Poster downloaded for ${bc_id} (${posterExtension})`);
+      }
+      result.skipped = false; // At least one image was processed
+    } catch (error) {
+      console.error(`Failed to download poster for ${bc_id}: ${error.message}`);
+      // Continue to thumbnail download
     }
-    result.skipped = false; // At least one image was processed
   } else {
     console.log(`No poster URL found in metadata for ${bc_id}`);
   }
   
-  // Extract and download thumbnail
+  // Extract and download thumbnail - catch errors so it doesn't affect poster
   const thumbnailUrl = getThumbnailUrlFromMetadata(metadata);
   if (thumbnailUrl) {
-    const thumbnailExtension = getExtensionFromUrl(thumbnailUrl);
-    const thumbnailResult = await downloadThumbnail(thumbnailUrl, bc_id, thumbnailExtension, outputDir);
-    result.thumbnailPath = thumbnailResult.path;
-    result.thumbnailSkipped = thumbnailResult.skipped;
-    result.thumbnailDownloaded = !thumbnailResult.skipped;
-    if (thumbnailResult.skipped) {
-      console.log(`Thumbnail already exists for ${bc_id}, skipped download`);
-    } else {
-      console.log(`Thumbnail downloaded for ${bc_id} (${thumbnailExtension})`);
+    try {
+      const thumbnailExtension = getExtensionFromUrl(thumbnailUrl);
+      const thumbnailResult = await downloadThumbnail(thumbnailUrl, bc_id, thumbnailExtension, outputDir);
+      result.thumbnailPath = thumbnailResult.path;
+      result.thumbnailSkipped = thumbnailResult.skipped;
+      result.thumbnailDownloaded = !thumbnailResult.skipped;
+      if (thumbnailResult.skipped) {
+        console.log(`Thumbnail already exists for ${bc_id}, skipped download`);
+      } else {
+        console.log(`Thumbnail downloaded for ${bc_id} (${thumbnailExtension})`);
+      }
+      result.skipped = false; // At least one image was processed
+    } catch (error) {
+      console.error(`Failed to download thumbnail for ${bc_id}: ${error.message}`);
+      // Continue processing
     }
-    result.skipped = false; // At least one image was processed
   } else {
     console.log(`No thumbnail URL found in metadata for ${bc_id}`);
   }
@@ -786,7 +848,7 @@ const processAllThumbnails = async (videoList) => {
 
 const main = async () => {
   try {
-    console.log('Starting Brightcove video migration...');
+    console.log('Starting Brightcove video migration (video, metadata, poster & thumbnail)...');
     console.log(`Skip existing files: ${SKIP_EXISTING_FILES ? 'ENABLED' : 'DISABLED'}`);
     console.log(`Max concurrent videos: ${MAX_CONCURRENT_VIDEOS}`);
     console.log(`Processing timeout: ${MAX_PROCESSING_TIME_MS / 1000 / 60} minutes per video`);
@@ -808,6 +870,10 @@ const main = async () => {
     const timeoutCount = results.filter(r => !r.success && r.error && r.error.includes('Timeout')).length;
     const videoSkippedCount = results.filter(r => r.success && r.videoSkipped).length;
     const metadataSkippedCount = results.filter(r => r.success && r.metadataSkipped).length;
+    const posterDownloadedCount = results.filter(r => r.success && r.posterDownloaded).length;
+    const posterSkippedCount = results.filter(r => r.success && r.posterSkipped).length;
+    const thumbnailDownloadedCount = results.filter(r => r.success && r.thumbnailDownloaded).length;
+    const thumbnailSkippedCount = results.filter(r => r.success && r.thumbnailSkipped).length;
     
     console.log(`\n=== Processing Complete ===`);
     console.log(`Total: ${results.length} videos`);
@@ -817,6 +883,12 @@ const main = async () => {
     console.log(`  - Other errors: ${failedCount - timeoutCount}`);
     console.log(`Videos skipped (already exist): ${videoSkippedCount}`);
     console.log(`Metadata skipped (already exist): ${metadataSkippedCount}`);
+    console.log(`\nPoster Statistics:`);
+    console.log(`  - Downloaded: ${posterDownloadedCount}`);
+    console.log(`  - Skipped (already exist): ${posterSkippedCount}`);
+    console.log(`\nThumbnail Statistics:`);
+    console.log(`  - Downloaded: ${thumbnailDownloadedCount}`);
+    console.log(`  - Skipped (already exist): ${thumbnailSkippedCount}`);
     
     return results;
   } catch (error) {
