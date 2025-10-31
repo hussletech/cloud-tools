@@ -6,7 +6,7 @@ const { parse } = require('csv-parse/sync');
 const { pipeline } = require('stream/promises');
 
 // const CSV_FILE_PATH = './bc-video-all.csv';
-const CSV_FILE_PATH = './latest-31OCT.csv';
+const CSV_FILE_PATH = './training-videos.csv';
 
 const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com';
 // const OUTPUT_BASE_PATH = './s3';
