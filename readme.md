@@ -1,5 +1,5 @@
 ```
-  ssh -i default_secure.pem ec2-user@54.234.96.110
+  ssh -i default_secure.pem ec2-user@107.22.142.62
 ```
 
 ```
