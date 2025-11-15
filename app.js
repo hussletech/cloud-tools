@@ -840,11 +840,12 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
   
   // Determine video file name - use fileName from CSV if available, otherwise construct it
   const videoFileName = fileName && fileName.trim() !== '' ? fileName : `${bc_id}.${container}`;
-  const videoPath = path.join(outputDir, videoFileName);
+  let videoPath = path.join(outputDir, videoFileName);
   
   // Set the video filename in result
   result.videoFileName = videoFileName;
   
+  console.log(`Checking video file: ${videoPath}`);
   // Check if video file exists (check common video extensions if not found)
   let videoExists = fs.existsSync(videoPath);
   if (!videoExists && (!fileName || fileName.trim() === '')) {
@@ -855,6 +856,8 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
       if (fs.existsSync(altPath)) {
         videoExists = true;
         result.videoFileName = `${bc_id}.${ext}`;
+        videoPath = altPath;
+        console.log(`Found alternate video file for ${bc_id}: ${result.videoFileName}`);
         break;
       }
     }
@@ -888,6 +891,10 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
         throw error;
       }
     }
+  }
+  
+  if (videoExists && !result.videoMissing) {
+    console.log(`Video file exists for ${bc_id}: ${path.basename(videoPath)}`);
   }
   
   // Ensure we have metadata for poster and thumbnail URLs
