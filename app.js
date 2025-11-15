@@ -839,7 +839,7 @@ const verifyAndDownloadMissing = async (videoInfo, accessToken) => {
   }
   
   // Determine video file name - use fileName from CSV if available, otherwise construct it
-  const videoFileName = fileName && fileName.trim() !== '' ? fileName : `${bc_id}.${container}`;
+  const videoFileName = `${bc_id}.mp4`;
   let videoPath = path.join(outputDir, videoFileName);
   
   // Set the video filename in result
