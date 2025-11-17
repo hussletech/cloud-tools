@@ -48,6 +48,17 @@
       "envFile": "${workspaceFolder}/.env",
       "console": "integratedTerminal",
       "internalConsoleOptions": "neverOpen"
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug Media Converter Job",
+      "skipFiles": ["<node_internals>/**"],
+      "program": "${workspaceFolder}/media_converter/job/app.js",
+      "cwd": "${workspaceFolder}/media_converter/job",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen"
     }
   ]
 }
