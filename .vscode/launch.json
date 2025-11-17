@@ -37,6 +37,17 @@
         "DEBUG_MODE": "true",
         "MAX_VIDEOS": "1"
       }
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Debug Media Converter",
+      "skipFiles": ["<node_internals>/**"],
+      "program": "${workspaceFolder}/media_converter/app.js",
+      "cwd": "${workspaceFolder}/media_converter",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen"
     }
   ]
 }

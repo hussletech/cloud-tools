@@ -1,0 +1,17 @@
+{
+  "name": "media-converter",
+  "version": "1.0.0",
+  "description": "S3 MP4 file lister for media converter jobs",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js"
+  },
+  "keywords": ["aws", "s3", "media", "converter"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.490.0",
+    "dotenv": "^16.3.0"
+  }
+}
+
