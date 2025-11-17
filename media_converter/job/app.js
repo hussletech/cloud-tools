@@ -1,5 +1,5 @@
 const { MediaConvertClient, CreateJobCommand, DescribeEndpointsCommand } = require('@aws-sdk/client-mediaconvert');
-const { S3Client, CopyObjectCommand, DeleteObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, CopyObjectCommand } = require('@aws-sdk/client-s3');
 const { parse } = require('csv-parse/sync');
 const fs = require('fs');
 const path = require('path');
@@ -151,45 +151,68 @@ function getOriginalKey(key) {
   return key.replace(/\.mp4$/i, '_original.mp4');
 }
 
-// Check if file exists in S3
-async function fileExists(bucket, key) {
+// Restore original filename by copying _original back
+async function restoreOriginalFilename(bucket, originalKey, originalKeyWithSuffix) {
+  console.log(`  🔄 Rolling back: Restoring original filename...`);
+  console.log(`     Copying ${originalKeyWithSuffix} back to ${originalKey}`);
+  
   try {
-    await s3Client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+    // Copy _original back to original filename
+    // If _original doesn't exist, CopyObject will throw an error
+    await s3Client.send(new CopyObjectCommand({
+      Bucket: bucket,
+      CopySource: `${bucket}/${originalKeyWithSuffix}`,
+      Key: originalKey
+    }));
+    
+    console.log(`  ✅ Original filename restored successfully`);
+    
+    // Optionally delete _original (keep it as backup for now)
+    // Uncomment the following if you want to clean up _original after restore
+    // try {
+    //   await s3Client.send(new DeleteObjectCommand({
+    //     Bucket: bucket,
+    //     Key: originalKeyWithSuffix
+    //   }));
+    //   console.log(`  ✅ _original backup file deleted`);
+    // } catch (error) {
+    //   console.log(`  ⚠️  Could not delete _original backup: ${error.message}`);
+    // }
+    
     return true;
   } catch (error) {
-    if (error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404) {
-      return false;
+    if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
+      throw new Error(`Cannot restore: _original file does not exist: ${originalKeyWithSuffix}`);
     }
+    console.error(`  ❌ Failed to restore original filename: ${error.message}`);
     throw error;
   }
 }
 
-// Rename file by copying to _original and deleting original
-async function renameToOriginal(bucket, originalKey) {
+// Create backup by copying original to _original (keep original file)
+// MediaConvert will overwrite the original file when outputting the processed video
+async function createBackup(bucket, originalKey) {
   const originalKeyWithSuffix = getOriginalKey(originalKey);
-  
-  // Check if _original already exists
-  const originalExists = await fileExists(bucket, originalKeyWithSuffix);
-  if (originalExists) {
-    console.log(`  ⚠️  Original file already exists: ${originalKeyWithSuffix}`);
-    return originalKeyWithSuffix;
+
+  // Copy original to _original as backup
+  // If source doesn't exist, CopyObject will throw an error
+  console.log(`  📋 Creating backup: ${originalKey} → ${originalKeyWithSuffix}`);
+  try {
+    await s3Client.send(new CopyObjectCommand({
+      Bucket: bucket,
+      CopySource: `${bucket}/${originalKey}`,
+      Key: originalKeyWithSuffix
+    }));
+    console.log(`  ✅ Backup created successfully`);
+  } catch (error) {
+    if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
+      throw new Error(`Source file does not exist: ${originalKey}`);
+    }
+    console.error(`  ❌ Backup creation failed: ${error.message}`);
+    throw new Error(`Failed to create backup ${originalKey} to ${originalKeyWithSuffix}: ${error.message}`);
   }
 
-  // Copy original to _original
-  console.log(`  📋 Copying ${originalKey} to ${originalKeyWithSuffix}`);
-  await s3Client.send(new CopyObjectCommand({
-    Bucket: bucket,
-    CopySource: `${bucket}/${originalKey}`,
-    Key: originalKeyWithSuffix
-  }));
-
-  // Delete original
-  console.log(`  🗑️  Deleting original file: ${originalKey}`);
-  await s3Client.send(new DeleteObjectCommand({
-    Bucket: bucket,
-    Key: originalKey
-  }));
-
+  // Keep original file - MediaConvert will overwrite it when outputting
   return originalKeyWithSuffix;
 }
 
@@ -197,14 +220,19 @@ async function renameToOriginal(bucket, originalKey) {
 async function createMediaConvertJob(inputS3Url, outputS3Url, index) {
   const jobConfig = JSON.parse(JSON.stringify(JOB_TEMPLATE));
   
-  // Update input and output paths
+  // Update input path
   jobConfig.Settings.Inputs[0].FileInput = inputS3Url;
-  jobConfig.Settings.OutputGroups[0].OutputGroupSettings.FileGroupSettings.Destination = outputS3Url;
   
-  // Add metadata
+  // Remove .mp4 extension from output destination
+  // MediaConvert will automatically add the extension based on container type (MP4)
+  // This prevents double extension like .mp4.mp4
+  const outputDestination = outputS3Url.replace(/\.mp4$/i, '');
+  jobConfig.Settings.OutputGroups[0].OutputGroupSettings.FileGroupSettings.Destination = outputDestination;
+  
+  // Add metadata (use original outputS3Url for reference)
   jobConfig.UserMetadata = {
     'input-file': inputS3Url,
-    'output-file': outputS3Url,
+    'output-file': outputS3Url, // Keep original URL in metadata for reference
     'job-index': index.toString()
   };
 
@@ -222,27 +250,44 @@ async function createMediaConvertJob(inputS3Url, outputS3Url, index) {
 async function processVideo(s3Url, index, total) {
   console.log(`\n[${index}/${total}] Processing: ${s3Url}`);
   
+  let originalKey = null;
+  let originalS3Url = null;
+  let originalKeyWithSuffix = null;
+  let backupCreated = false;
+  
   try {
     const { bucket, key } = parseS3Url(s3Url);
     
-    // Step 1: Rename original file to _original
-    const originalKey = await renameToOriginal(bucket, key);
-    const originalS3Url = `s3://${bucket}/${originalKey}`;
+    // Step 1: Create backup of original file to _original
+    // Keep original file - MediaConvert will overwrite it when outputting
+    // If source doesn't exist, createBackup will throw an error
+    originalKeyWithSuffix = await createBackup(bucket, key);
+    originalKey = key;
+    originalS3Url = `s3://${bucket}/${originalKeyWithSuffix}`;
+    backupCreated = true; // Track that we've created a backup
     
     // Step 2: Create MediaConvert job
-    // Input: _original file, Output: original filename
-    const outputS3Url = s3Url; // Output should be the original filename
+    // Input: _original backup file, Output: original filename (will overwrite existing)
+    const outputS3Url = s3Url; // Output to original filename - MediaConvert will overwrite
     console.log(`  🎬 Creating MediaConvert job...`);
-    console.log(`     Input:  ${originalS3Url}`);
-    console.log(`     Output: ${outputS3Url}`);
+    console.log(`     Input:  ${originalS3Url} (backup)`);
+    console.log(`     Output: ${outputS3Url} (MediaConvert will add .mp4 extension)`);
     
     const jobId = await createMediaConvertJob(originalS3Url, outputS3Url, index);
     console.log(`  ✅ Job created successfully! Job ID: ${jobId}`);
+    console.log(`  ℹ️  Original file kept until MediaConvert completes. Backup available at: ${originalS3Url}`);
     
     return { success: true, jobId, s3Url, originalS3Url, outputS3Url };
   } catch (error) {
     console.error(`  ❌ Failed to process: ${error.message}`);
-    return { success: false, error: error.message, s3Url };
+    
+    // No rollback needed - original file was never deleted
+    // If backup was created but job failed, original file is still intact
+    if (backupCreated && originalKeyWithSuffix) {
+      console.log(`  ℹ️  Original file is safe. Backup available at: s3://${parseS3Url(s3Url).bucket}/${originalKeyWithSuffix}`);
+    }
+    
+    return { success: false, error: error.message, s3Url, originalS3Url };
   }
 }
 
