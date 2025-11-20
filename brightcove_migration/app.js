@@ -5,7 +5,7 @@ const path = require('path');
 const { parse } = require('csv-parse/sync');
 const { pipeline } = require('stream/promises');
 
-const CSV_FILE_PATH = './bc-video-all-new.csv';
+const CSV_FILE_PATH = './bc-video-all-20Nov.csv';
 // const CSV_FILE_PATH = './training-videos.csv';
 
 const OUTPUT_BASE_PATH = '/home/ec2-user/assets.soundconcepts.com';

@@ -66,6 +66,8 @@ const JOB_TEMPLATE = {
             DestinationSettings: {
               S3Settings: {
                 StorageClass: 'STANDARD'
+                // Note: MediaConvert automatically overwrites existing files in S3
+                // No explicit "overwrite" setting is needed - this is the default behavior
               }
             }
           }

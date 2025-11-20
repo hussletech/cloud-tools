@@ -1,0 +1,11 @@
+{
+  "name": "media-convert-lambda",
+  "version": "1.0.0",
+  "description": "Lambda function to trigger MediaConvert jobs",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-mediaconvert": "^3.490.0",
+    "@aws-sdk/client-s3": "^3.490.0"
+  }
+}
+

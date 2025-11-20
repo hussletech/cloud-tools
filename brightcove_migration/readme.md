@@ -1,6 +1,7 @@
 ```
-  ssh -i default_secure.pem ec2-user@107.22.142.62
+  ssh -i default_secure.pem ec2-user@54.236.50.242
 ```
+/home/ec2-user/mount.sh
 
 ```
 # Script location
