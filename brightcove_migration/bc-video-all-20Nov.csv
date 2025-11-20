@@ -1,4 +1,4 @@
-"db_name","video_id","site_id","webroot","bc_id"
+"db_name,""video_id"",""site_id"",""webroot"",""bc_id"""
 repsites_arbonne,6461,260,webroot_arbonne,"6384298878112"
 repsites_galexxy,5522,266,webroot_galexxy,"6348290539112"
 repsites_galexxy,5523,266,webroot_galexxy,"6349007402112"
