@@ -24,7 +24,7 @@ const BRIGHTCOVE_CMS_URL = 'https://cms.api.brightcove.com/v1';
 const BRIGHTCOVE_ACCOUNT_ID = '659677170001';
 
 const getAuthHeader = () => {
-  const credentials = Buffer.from(`${process.env.API_KEY}:${process.env.API_SECRET}`).toString('base64');
+  const credentials = Buffer.from(`93395b95-99c9-45ec-b979-858fffede212:-DlkzSzKl1LspxL_wKt9iBMbnag8sXpOcFXNLXTTtg7fcog8d0wesAwJrDd1um03cgqtZa9ZLAV9ha5gDnk6PA`).toString('base64');
   return `Basic ${credentials}`;
 };
 
@@ -90,17 +90,32 @@ const readCsvFile = (filePath) => {
 };
 
 const getAccessToken = async () => {
-  const response = await axios.post(
-    BRIGHTCOVE_OAUTH_URL,
-    'grant_type=client_credentials',
-    {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': getAuthHeader()
+  try {
+    const response = await axios.post(
+      BRIGHTCOVE_OAUTH_URL,
+      'grant_type=client_credentials',
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': getAuthHeader()
+        }
       }
+    );
+    return response.data.access_token;
+  } catch (error) {
+    if (error.response) {
+      console.error('API Error - Status:', error.response.status);
+      console.error('API Error - Data:', error.response.data);
+      console.error('API Error - Headers:', error.response.headers);
+      throw new Error(`Brightcove API error: ${error.response.status} - ${JSON.stringify(error.response.data)}`);
+    } else if (error.request) {
+      console.error('API Error - No response received:', error.request);
+      throw new Error(`Brightcove API request failed: ${error.message}`);
+    } else {
+      console.error('API Error - Request setup failed:', error.message);
+      throw new Error(`Brightcove API error: ${error.message}`);
     }
-  );
-  return response.data.access_token;
+  }
 };
 
 const getVideoMetadata = async (bcId, accessToken) => {
