@@ -11,6 +11,9 @@ export interface MediaTriggerStackProps extends cdk.StackProps {
   existingBucketName?: string;
   mediaConvertQueueArn?: string;
   mediaConvertRoleArn?: string;
+  dailyJobLimit?: number;
+  counterBucketName?: string;
+  counterPrefix?: string; // Optional prefix for counter files (e.g., 'brightcove/')
 }
 
 export class MediaTriggerStack extends cdk.Stack {
@@ -23,6 +26,8 @@ export class MediaTriggerStack extends cdk.Stack {
       'arn:aws:iam::964957925184:role/service-role/MediaConvert_Default_Role';
 
     const inputBucket = s3.Bucket.fromBucketName(this, 'InputBucket', "assets.soundconcepts.com");
+    const dailyJobLimit = props?.dailyJobLimit || 100;
+    const counterBucket = s3.Bucket.fromBucketName(this, 'CounterBucket', "assets.soundconcepts.com");
 
     const mediaConvertLambda = new lambda.Function(this, 'MediaConvertLambda', {
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -30,10 +35,14 @@ export class MediaTriggerStack extends cdk.Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda')),
       timeout: cdk.Duration.minutes(5),
       memorySize: 512,
+      reservedConcurrentExecutions: 1,
       environment: {
         MEDIA_CONVERT_QUEUE_ARN: mediaConvertQueueArn,
         MEDIA_CONVERT_ROLE_ARN: mediaConvertRoleArn,
         INPUT_BUCKET_NAME: inputBucket.bucketName,
+        DAILY_JOB_LIMIT: dailyJobLimit.toString(),
+        COUNTER_BUCKET: counterBucket.bucketName,
+        COUNTER_PREFIX: 'brightcove-videos',
       },
     });
 
@@ -56,6 +65,12 @@ export class MediaTriggerStack extends cdk.Stack {
 
     inputBucket.grantRead(mediaConvertLambda);
     inputBucket.grantWrite(mediaConvertLambda);
+    
+    // Grant permissions for counter bucket (if different from input bucket)
+    if (counterBucket.bucketName !== inputBucket.bucketName) {
+      counterBucket.grantRead(mediaConvertLambda);
+      counterBucket.grantWrite(mediaConvertLambda);
+    }
 
     const rule = new events.Rule(this, 'S3MP4UploadRule', {
       eventPattern: {

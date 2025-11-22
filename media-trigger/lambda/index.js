@@ -1,10 +1,19 @@
 const { MediaConvertClient, CreateJobCommand, DescribeEndpointsCommand } = require('@aws-sdk/client-mediaconvert');
-const { S3Client, CopyObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, CopyObjectCommand, HeadObjectCommand, GetObjectCommand, PutObjectCommand, ListObjectsV2Command, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+
+// Environment variables - read once at module load
+const AWS_REGION = process.env.AWS_REGION || 'us-east-1';
+const MEDIA_CONVERT_QUEUE_ARN = process.env.MEDIA_CONVERT_QUEUE_ARN;
+const MEDIA_CONVERT_ROLE_ARN = process.env.MEDIA_CONVERT_ROLE_ARN;
+const DAILY_JOB_LIMIT = parseInt(process.env.DAILY_JOB_LIMIT || '100', 10);
+const COUNTER_BUCKET = 'assets.soundconcepts.com';
+const COUNTER_KEY_PREFIX = `brightcove-videos/mediaconvert-daily-counter/`;
+const COUNTER_EXPIRATION_DAYS = 2;
 
 const JOB_TEMPLATE = {
-  Queue: process.env.MEDIA_CONVERT_QUEUE_ARN,
+  Queue: MEDIA_CONVERT_QUEUE_ARN,
   UserMetadata: {},
-  Role: process.env.MEDIA_CONVERT_ROLE_ARN,
+  Role: MEDIA_CONVERT_ROLE_ARN,
   Settings: {
     TimecodeConfig: {
       Source: 'ZEROBASED'
@@ -53,7 +62,7 @@ const JOB_TEMPLATE = {
             Destination: '',
             DestinationSettings: {
               S3Settings: {
-                StorageClass: 'STANDARD'
+                StorageClass: 'INTELLIGENT_TIERING'
               }
             }
           }
@@ -85,11 +94,147 @@ let mediaConvertClient = null;
 let mediaConvertEndpoint = null;
 
 const s3Client = new S3Client({
-  region: process.env.AWS_REGION || 'us-east-1'
+  region: AWS_REGION
 });
+
+
+function getTodayDateKey() {
+  const now = new Date();
+  const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD format
+  return `${COUNTER_KEY_PREFIX}${dateStr}.txt`;
+}
+
+async function getDailyCounter(bucket, dateKey) {
+  try {
+    const response = await s3Client.send(new GetObjectCommand({
+      Bucket: bucket,
+      Key: dateKey
+    }));
+    
+    const body = await response.Body.transformToString();
+    const count = parseInt(body.trim(), 10);
+    return isNaN(count) ? 0 : count;
+  } catch (error) {
+    // Handle case where counter file doesn't exist yet (first job of the day)
+    const isNotFound = 
+      error.name === 'NoSuchKey' || 
+      error.name === 'NotFound' ||
+      error.$metadata?.httpStatusCode === 404;
+    
+    if (isNotFound) {
+      return 0; // First job of the day - counter file doesn't exist yet
+    }
+    throw error;
+  }
+}
+
+async function incrementDailyCounter(bucket, dateKey, maxRetries = 5) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // Read current count
+      const currentCount = await getDailyCounter(bucket, dateKey);
+      
+      // Check if we've hit the limit
+      if (currentCount >= DAILY_JOB_LIMIT) {
+        return { success: false, count: currentCount, limit: DAILY_JOB_LIMIT };
+      }
+      
+      // Increment and write back
+      const newCount = currentCount + 1;
+      // Calculate expiration date (2 days from now)
+      const expirationDate = new Date();
+      expirationDate.setDate(expirationDate.getDate() + COUNTER_EXPIRATION_DAYS);
+      
+      await s3Client.send(new PutObjectCommand({
+        Bucket: bucket,
+        Key: dateKey,
+        Body: newCount.toString(),
+        ContentType: 'text/plain',
+        Metadata: {
+          'expires-after-days': COUNTER_EXPIRATION_DAYS.toString(),
+          'expiration-date': expirationDate.toISOString()
+        }
+      }));
+      
+      return { success: true, count: newCount, limit: DAILY_JOB_LIMIT };
+    } catch (error) {
+      // If it's a race condition (concurrent writes), retry
+      if (attempt < maxRetries - 1) {
+        // Exponential backoff: wait 50ms * 2^attempt
+        await new Promise(resolve => setTimeout(resolve, 50 * Math.pow(2, attempt)));
+        continue;
+      }
+      throw error;
+    }
+  }
+  
+  throw new Error('Failed to increment counter after retries');
+}
+
+async function cleanupOldCounterFiles(bucket) {
+  try {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - COUNTER_EXPIRATION_DAYS);
+    const cutoffDateStr = cutoffDate.toISOString().split('T')[0];
+    
+    // List all counter files
+    const listCommand = new ListObjectsV2Command({
+      Bucket: bucket,
+      Prefix: COUNTER_KEY_PREFIX
+    });
+    
+    const response = await s3Client.send(listCommand);
+    
+    if (!response.Contents || response.Contents.length === 0) {
+      return;
+    }
+    
+    // Delete files older than retention period
+    const deletePromises = [];
+    for (const object of response.Contents) {
+      // Extract date from filename: .mediaconvert-daily-counter/YYYY-MM-DD.txt
+      const match = object.Key.match(/(\d{4}-\d{2}-\d{2})\.txt$/);
+      if (match && match[1] < cutoffDateStr) {
+        deletePromises.push(
+          s3Client.send(new DeleteObjectCommand({
+            Bucket: bucket,
+            Key: object.Key
+          })).catch(err => {
+            console.warn(`Failed to delete old counter file ${object.Key}: ${err.message}`);
+          })
+        );
+      }
+    }
+    
+    if (deletePromises.length > 0) {
+      await Promise.all(deletePromises);
+      console.log(`Cleaned up ${deletePromises.length} old counter file(s) older than ${COUNTER_EXPIRATION_DAYS} days`);
+    }
+  } catch (error) {
+    // Don't fail the main operation if cleanup fails
+    console.warn(`Counter cleanup failed (non-critical): ${error.message}`);
+  }
+}
 
 function getOriginalKey(key) {
   return key.replace(/\.mp4$/i, '_original.mp4');
+}
+
+async function checkOriginalExists(bucket, originalKey) {
+  const originalKeyWithSuffix = getOriginalKey(originalKey);
+  
+  try {
+    await s3Client.send(new HeadObjectCommand({
+      Bucket: bucket,
+      Key: originalKeyWithSuffix
+    }));
+    return true;
+  } catch (error) {
+    if (error.name === 'NotFound' || error.$metadata?.httpStatusCode === 404) {
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function createBackup(bucket, originalKey) {
@@ -100,7 +245,8 @@ async function createBackup(bucket, originalKey) {
     await s3Client.send(new CopyObjectCommand({
       Bucket: bucket,
       CopySource: `${bucket}/${originalKey}`,
-      Key: originalKeyWithSuffix
+      Key: originalKeyWithSuffix,
+      StorageClass: 'INTELLIGENT_TIERING'
     }));
     console.log(`Backup created successfully`);
     return originalKeyWithSuffix;
@@ -117,12 +263,10 @@ async function getMediaConvertEndpoint() {
   if (mediaConvertEndpoint) {
     return mediaConvertEndpoint;
   }
-
-  const region = process.env.AWS_REGION || 'us-east-1';
   
   try {
     const tempClient = new MediaConvertClient({
-      region: region
+      region: AWS_REGION
     });
     
     const command = new DescribeEndpointsCommand({ MaxResults: 1 });
@@ -146,11 +290,10 @@ async function getMediaConvertClient() {
     return mediaConvertClient;
   }
 
-  const region = process.env.AWS_REGION || 'us-east-1';
   const endpoint = await getMediaConvertEndpoint();
   
   mediaConvertClient = new MediaConvertClient({
-    region: region,
+    region: AWS_REGION,
     endpoint: endpoint
   });
   
@@ -189,11 +332,11 @@ exports.handler = async (event) => {
     const bucketName = event.detail.bucket.name;
     const objectKey = event.detail.object.key;
 
-    if(!objectKey.includes('webroot_test/assets/video/')) {
-      console.log(`Skipping non-test file: ${objectKey}`);
+    if(!objectKey.includes('webroot_test/assets/video/') || (objectKey.includes("_original"))) {
+      console.log(`Skipping file: ${objectKey}`);
       return {
         statusCode: 200,
-        body: JSON.stringify({ message: 'Skipped: Not a test file' })
+        body: JSON.stringify({ message: 'Skipped: Not a test file or original file' })
       };
     }
     
@@ -205,16 +348,68 @@ exports.handler = async (event) => {
       };
     }
 
-    const originalKeyWithSuffix = await createBackup(bucketName, objectKey);
+    // Check daily job limit at the beginning (before any expensive operations)
+    const dateKey = getTodayDateKey();
+    const currentCount = await getDailyCounter(COUNTER_BUCKET, dateKey);
+    
+    if (currentCount >= DAILY_JOB_LIMIT) {
+      console.log(`Daily job limit reached: ${currentCount}/${DAILY_JOB_LIMIT}`);
+      return {
+        statusCode: 429,
+        body: JSON.stringify({
+          message: 'Daily job limit reached',
+          currentCount: currentCount,
+          limit: DAILY_JOB_LIMIT,
+          retryAfter: 'tomorrow'
+        })
+      };
+    }
+
+    const originalKeyWithSuffix = getOriginalKey(objectKey);
+    const originalExists = await checkOriginalExists(bucketName, objectKey);
+    
+    if (originalExists) {
+      console.log(`Skipping: _original file already exists: ${originalKeyWithSuffix}`);
+      return {
+        statusCode: 200,
+        body: JSON.stringify({ message: 'Skipped: _original file already exists, processing may already be in progress' })
+      };
+    }
+
+    await createBackup(bucketName, objectKey);
     const inputS3Url = `s3://${bucketName}/${originalKeyWithSuffix}`;
     const outputS3Url = `s3://${bucketName}/${objectKey}`;
 
     console.log(`Processing: ${inputS3Url}`);
     console.log(`Output: ${outputS3Url}`);
 
+    // Increment counter (we already checked the limit above)
+    const counterResult = await incrementDailyCounter(COUNTER_BUCKET, dateKey);
+    
+    if (!counterResult.success) {
+      // This should rarely happen since we checked above, but handle race condition
+      console.log(`Daily job limit reached during increment: ${counterResult.count}/${counterResult.limit}`);
+      return {
+        statusCode: 429,
+        body: JSON.stringify({
+          message: 'Daily job limit reached',
+          currentCount: counterResult.count,
+          limit: counterResult.limit,
+          retryAfter: 'tomorrow'
+        })
+      };
+    }
+    
+    console.log(`Daily job count: ${counterResult.count}/${counterResult.limit}`);
+
     const jobId = await createMediaConvertJob(inputS3Url, outputS3Url);
     
     console.log(`✅ MediaConvert job created successfully! Job ID: ${jobId}`);
+
+    // // Cleanup old counter files asynchronously (non-blocking)
+    // cleanupOldCounterFiles(COUNTER_BUCKET).catch(err => {
+    //   console.warn(`Background cleanup failed (non-critical): ${err.message}`);
+    // });
 
     return {
       statusCode: 200,
